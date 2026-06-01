@@ -18,7 +18,7 @@ jobs:
     - uses: actions/checkout@v4
     - uses: actions-use/setup-rust@stable
       with:
-        toolchain: 
+        toolchain: stable
     - name: Build
       run: cargo build --verbose
     - name: Run tests

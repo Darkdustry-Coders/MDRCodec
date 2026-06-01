@@ -1,8 +1,10 @@
+//! Internal encoder implementation.
+//!
+//! The actual underlying encoder is runtime-typed. If you want to
+//! have proper typing, consider using [crate::sync] or [crate::future].
+
 use std::{
-    borrow::Cow,
-    io::{self, Seek, Write},
-    marker::PhantomData,
-    time::{Duration, Instant},
+    borrow::Cow, io::{self, Seek, Write}, marker::PhantomData, mem::transmute, time::{Duration, Instant}
 };
 
 #[cfg(feature = "futures")]
@@ -12,7 +14,7 @@ use futures_util::{AsyncSeekExt, AsyncWriteExt};
 
 use crate::{
     data::ChunkKind,
-    io::{GenericIo, TryClone},
+    io::{GenericIo, TryClone, WriteExt},
     opt::Compression,
 };
 
@@ -76,16 +78,18 @@ macro_rules! aseek {
 ///
 /// If the configured JMP table needs less zeroes than this buffer provides,
 /// it will not allocate a new buffer.
-static ZEROES: &[u8] = &[0;
-    (8 /* Timestamp (in millis) */ + 8 /* File pointer */ + 1/* Entry validity */) * 1024
-    + 8 /* File pointer to the next JMP chunk */ + 1 /* Entry validity */];
+static ZEROES: &[u8] = &[0; (1 /* Entry chunk type */ +
+                             8 /* Timestamp (in millis) */ +
+                             8 /* File pointer */ +
+                             1 /* Entry validity */)
+   * 1023
+   + 8 /* File pointer to the next JMP chunk */ + 1 /* Entry validity */];
 
 /// Encoder builder.
 pub struct Builder<W> {
     write: GenericIo<W>,
-    snapshot_duration: Duration,
+    snapshot_duration: u64,
     jmptable_size: usize,
-    jmptable_waittime: u64,
     mod_buffer_size: usize,
     compression: Compression,
 
@@ -96,9 +100,8 @@ impl<W> Builder<W> {
     pub fn new(write: W) -> Self {
         Self {
             write: GenericIo::new_empty(write),
-            snapshot_duration: Duration::from_secs(10),
+            snapshot_duration: 120000,
             jmptable_size: 1024,
-            jmptable_waittime: 1000,
             mod_buffer_size: 1024 * 64,
             compression: Compression::None,
 
@@ -106,14 +109,19 @@ impl<W> Builder<W> {
         }
     }
 
-    /// Specify how long will it take until a new MAP chunk and a
-    /// JMP entry is created.
+    /// Specify how long will it take until a new MAP chunk is created.
     ///
-    /// Only takes effect if this [Encoder] is either seekable or
-    /// try-cloneable.
+    /// If [Duration::ZERO], only a MAP chunk at the start will be created.
+    ///
+    /// Only takes effect if seeking is enabled as otherwise MAP chunks aren't
+    /// necessary.
     #[must_use]
     pub fn snapshot_duration(mut self, duration: Duration) -> Self {
-        self.snapshot_duration = duration;
+        if duration.is_zero() {
+            self.snapshot_duration = 0;
+        } else {
+            self.snapshot_duration = duration.as_millis().min(1000) as u64;
+        }
         self
     }
 
@@ -131,7 +139,7 @@ impl<W> Builder<W> {
     /// try-cloneable.
     #[must_use]
     pub fn jmptable_size(mut self, size: usize) -> Self {
-        self.jmptable_size = size.max(1);
+        self.jmptable_size = size.max(1).min(i32::MAX as usize);
         self
     }
 
@@ -216,8 +224,11 @@ impl<W> Builder<W> {
             }
         }
 
-        let jmptable_bufsize = (8 /* Timestamp (in millis) */ + 8 /* File pointer */ + 1/* Entry validity */)
-            * self.jmptable_size
+        let jmptable_bufsize = (1 /* Entry chunk type */ +
+                                       8 /* Timestamp (in millis) */ +
+                                       8 /* File pointer */ +
+                                       1 /* Entry validity */)
+            * (self.jmptable_size - 1)
             + 8 /* File pointer to the next JMP chunk */
             + 1 /* Entry validity */;
 
@@ -233,14 +244,21 @@ impl<W> Builder<W> {
             jmptable_remaining: 0,
             jmptable_at: JmpTableImpl::None,
             jmptable_at_ptr: 0,
+            jmptable_last_ts: 0,
+
             mod_act_buffer: vec![0; self.mod_buffer_size].into_boxed_slice(),
             mod_act_len: 0,
+            snapshot_rate: 0,
+            mod_start_ts: self.snapshot_duration,
 
             epoch: Instant::now(),
         };
 
-        swrite!(enc).write_all(b"MDR\0")?;
-        swrite!(enc).flush()?;
+        let mut write = swrite!(enc);
+        write.write_all(b"MDR\0")?;
+        write.write_u16_le(1)?;
+        self.compression.write(&mut write)?;
+        write.flush()?;
 
         Ok(enc)
     }
@@ -248,6 +266,8 @@ impl<W> Builder<W> {
     #[cfg(feature = "futures")]
     pub async fn build_async(self) -> io::Result<Encoder<W>> {
         use futures_util::AsyncWriteExt as _;
+
+        use crate::io::AsyncWriteExt;
 
         if !self.write.is_async_writeable() {
             return Err(io::Error::new(
@@ -270,8 +290,11 @@ impl<W> Builder<W> {
             }
         }
 
-        let jmptable_bufsize = (8 /* Timestamp (in millis) */ + 8 /* File pointer */ + 1/* Entry validity */)
-            * self.jmptable_size
+        let jmptable_bufsize = (1 /* Entry chunk type */ +
+                                       8 /* Timestamp (in millis) */ +
+                                       8 /* File pointer */ +
+                                       1 /* Entry validity */)
+            * (self.jmptable_size - 1)
             + 8 /* File pointer to the next JMP chunk */
             + 1 /* Entry validity */;
 
@@ -288,15 +311,20 @@ impl<W> Builder<W> {
             jmptable_at: JmpTableImpl::None,
             jmptable_at_ptr: 0,
             jmptable_last_ts: 0,
-            jmptable_waittime: self.jmptable_waittime,
+
             mod_act_buffer: vec![0; self.mod_buffer_size].into_boxed_slice(),
             mod_act_len: 0,
+            snapshot_rate: 0,
+            mod_start_ts: self.snapshot_duration,
 
             epoch: Instant::now(),
         };
 
-        awrite!(enc).write_all(b"MDR\0").await?;
-        awrite!(enc).flush().await?;
+        let mut write = awrite!(enc);
+        write.write_all(b"MDR\0").await?;
+        write.write_u16_le(1).await?;
+        self.compression.write_async(&mut write).await?;
+        write.flush().await?;
 
         Ok(enc)
     }
@@ -372,8 +400,6 @@ pub struct Encoder<W> {
     /// Compression to use for large chunks.
     compression: Compression,
 
-    /// Amount of milliseconds to wait before creating a new jump table.
-    jmptable_waittime: u64,
     /// Amount of entries in jump table.
     jmptable_size: usize,
     /// File pointer location of the previous jump table.
@@ -393,7 +419,14 @@ pub struct Encoder<W> {
     /// Buffer for modifications.
     mod_act_buffer: Box<[u8]>,
     /// Length of data used in [Self::mod_act_buffer].
+    ///
+    /// If `0`, buffer is not being used.
     mod_act_len: usize,
+    /// Starting timestamp for the current modification buffer.
+    mod_start_ts: u64,
+
+    /// Maximum duration until the buffer is submitted.
+    snapshot_rate: u64,
 
     /// Writing destination.
     write: GenericIo<W>,
@@ -439,6 +472,10 @@ impl<W> Encoder<W> {
     #[cfg(feature = "futures")]
     pub const fn is_async(&self) -> bool {
         self.write.is_async_writeable()
+    }
+
+    pub const fn snapshot_rate(&self) -> Duration {
+        Duration::from_millis(self.snapshot_rate)
     }
 
     /// Check availability and consistency of features.
@@ -529,38 +566,64 @@ impl<W> Encoder<W> {
             let this_pos = sseek!(self).stream_position()?;
             let prev_jmpt = self.jmptable_at_ptr;
 
-            match &self.jmptable_at {
-                JmpTableImpl::None => {
-                    self.jmptable_at_ptr = this_pos;
-                    self.jmptable_last_ts = timestamp;
-
-                    let mut header = [0; 1 + 8 + 4];
-                    header[0] = ChunkKind::Jmp.ordinal();
-                    header[1..][..8].copy_from_slice(&timestamp.to_le_bytes());
-                    header[1 + 8..][..4].copy_from_slice(&(data.len() as u32).to_le_bytes());
-
-                    if let Some(new_io) = self.write.try_clone() {
-                        self.jmptable_at = JmpTableImpl::File(new_io?);
-                    } else {
-                        self.jmptable_at = JmpTableImpl::Addr(self.jmptable_at_ptr);
-                    }
-                }
+            if match &mut self.jmptable_at {
+                JmpTableImpl::None => true,
                 JmpTableImpl::Addr(addr) => {
-                    if self.jmptable_last_ts - timestamp > self.jmptable_zeroes
+                    if self.jmptable_remaining > 0 {
+                        self.jmptable_remaining -= 1;
+                        sseek!(self).seek(io::SeekFrom::Start(*addr))?;
+                        let mut write = swrite!(self);
+                        write.write_u8(name.ordinal())?;
+                        write.write_u64_le(timestamp)?;
+                        write.write_u64_le(this_pos)?;
+                        sseek!(self).seek(io::SeekFrom::Start(this_pos))?;
+
+                        false
+                    } else { true }
                 },
-                JmpTableImpl::File(generic_io) => {}
+                JmpTableImpl::File(io) => {
+                    if self.jmptable_remaining > 0 {
+                        self.jmptable_remaining -= 1;
+                        let mut write = io.writeable().unwrap();
+                        write.write_u8(name.ordinal())?;
+                        write.write_u64_le(timestamp)?;
+                        write.write_u64_le(this_pos)?;
+
+                        false
+                    } else { true }
+                }
+            } {
+                let mut write = swrite!(self);
+                write.write_u8(ChunkKind::Jmp.ordinal())?;
+                write.write_u64_le(timestamp)?;
+                write.write_u32_le(self.jmptable_zeroes.len() as u32)?;
+                write.write_all(&self.jmptable_zeroes)?;
+                write.write_u8(ChunkKind::Jmp.ordinal())?;
+                write.write_u32_le(self.jmptable_zeroes.len() as u32)?;
+                write.write_u64_le(timestamp)?;
+                write.write_u64_le(prev_jmpt)?;
+
+                self.jmptable_at_ptr = this_pos;
+                self.jmptable_last_ts = timestamp;
+                self.jmptable_remaining = self.jmptable_size;
+
+                if let Some(new_io) = self.write.try_clone() {
+                    self.jmptable_at = JmpTableImpl::File(new_io?);
+                } else {
+                    self.jmptable_at = JmpTableImpl::Addr(self.jmptable_at_ptr);
+                }
             }
         }
 
-        let mut header = [0; 1 + 8 + 4];
-        header[0] = name.ordinal();
-        header[1..][..8].copy_from_slice(&timestamp.to_le_bytes());
-        header[1 + 8..][..4].copy_from_slice(&(data.len() as u32).to_le_bytes());
-
-        swrite!(self).write_all(&header)?;
-        swrite!(self).write_all(data)?;
-        swrite!(self).write_all(&(data.len() as u32).to_le_bytes())?;
-        swrite!(self).write_all(&self.jmptable_at_ptr.to_le_bytes())?;
+        let mut write = swrite!(self);
+        write.write_u8(name.ordinal())?;
+        write.write_u64_le(timestamp)?;
+        write.write_u32_le(data.len() as u32)?;
+        write.write_all(data)?;
+        write.write_u8(name.ordinal())?;
+        write.write_u32_le(data.len() as u32)?;
+        write.write_u64_le(timestamp)?;
+        write.write_u64_le(self.jmptable_at_ptr)?;
 
         Ok(())
     }
@@ -616,9 +679,41 @@ impl<W> Encoder<W> {
         Ok(())
     }
 
-    /// Flush all written data.
+    /// Flush modifications data.
+    fn flush_mod(&mut self) -> io::Result<()> {
+        if self.mod_act_len > 0 {
+            // Safety: `write_chunk` never modifies this buffer, so it's safe.
+            let buffer: &'static [u8] = unsafe { transmute(&self.mod_act_buffer[0..self.mod_act_len]) };
+            self.write_chunk(ChunkKind::Mod, self.mod_start_ts, buffer)?;
+            self.mod_act_len = 0;
+        }
+
+        Ok(())
+    }
+
+    /// Flush modifications data.
     ///
-    /// Simply triggers the underlying [Write::flush].
+    /// ## Cancellation safety
+    ///
+    /// This method is *not* cancel-safe. Cancelling this method may
+    /// result in broken chunks, as well as corrupting the internal
+    /// buffer, making the file unreadable.
+    #[cfg(feature = "futures")]
+    async fn flush_mod_async(&mut self) -> io::Result<()> {
+        if self.mod_act_len > 0 {
+            // Safety: `write_chunk_async` never modifies this buffer, so it's safe.
+            //         While it's possible that this method gets cancelled and another write
+            //         into this buffer may occur and do some unexpected things, that's entirely
+            //         on dev's fault.
+            let buffer: &'static [u8] = unsafe { transmute(&self.mod_act_buffer[0..self.mod_act_len]) };
+            self.write_chunk_async(ChunkKind::Mod, self.mod_start_ts, buffer).await?;
+            self.mod_act_len = 0;
+        }
+
+        Ok(())
+    }
+
+    /// Flush all written data.
     pub fn flush(&mut self) -> io::Result<()> {
         self.expect_features(false)?;
         swrite!(self).flush()

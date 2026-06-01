@@ -7,6 +7,11 @@ A codec for Mindurka's replay format.
 >
 > This project is incredible WIP and the project in this state may not even work!
 
+## Performance notes
+
+While we don't strictly enforce it, we assume that all I/O is buffered, and thus an individual `write`
+call to write one byte is okay. If not, writing could be extremely slow.
+
 ## Planned features
 
 - Support for both sync and async

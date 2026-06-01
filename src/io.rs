@@ -78,6 +78,8 @@ pub trait AsRawHandle {
 
     /// Obtain a raw handle.
     ///
+    /// ## Safety
+    ///
     /// Due to it potentially causing issues with `close()`, this method
     /// is marked as unsafe.
     unsafe fn as_raw(&self) -> Self::Handle;
@@ -110,6 +112,8 @@ impl RawFileHandle {
     }
 
     /// Construct a [File] out of this file handle.
+    ///
+    /// ## Safety
     ///
     /// Since this method could potentially create multiple
     /// [File]s referencing the same file descriptor, this method
@@ -325,6 +329,9 @@ impl<O: TryClone> TryCloneVTable<O> {
     }
 }
 
+// Allowing `clippy::type_complexity` on all of these as those are basically just
+// signatures of the async functions that will only be used there and nowhere else.
+
 /// An [AsyncSeek] object.
 #[cfg(feature = "futures")]
 pub struct AsyncSeekable<'a, W> {
@@ -332,6 +339,7 @@ pub struct AsyncSeekable<'a, W> {
     vtable: &'a AsyncSeekVTable<W>,
 }
 #[cfg(feature = "futures")]
+#[allow(clippy::type_complexity)]
 impl<'a, W> AsyncSeek for AsyncSeekable<'a, W> {
     fn poll_seek(
         mut self: std::pin::Pin<&mut Self>,
@@ -422,6 +430,7 @@ impl<'a, W> AsyncWrite for AsyncWriteable<'a, W> {
 }
 
 #[cfg(feature = "futures")]
+#[allow(clippy::type_complexity)]
 struct AsyncWriteVTable<O> {
     poll_write: fn(
         this: std::pin::Pin<&mut O>,
@@ -494,6 +503,7 @@ impl<'a, W> AsyncRead for AsyncReadable<'a, W> {
 }
 
 #[cfg(feature = "futures")]
+#[allow(clippy::type_complexity)]
 struct AsyncReadVTable<O> {
     poll_read: fn(
         this: std::pin::Pin<&mut O>,
@@ -929,6 +939,62 @@ macro_rules! read_ext {
     };
 }
 read_ext! {
+    fn read_i8(&mut self, i8);
+    fn read_i16_le(&mut self, i16);
+    fn read_i32_le(&mut self, i32);
+    fn read_i64_le(&mut self, i64);
+    fn read_i128_le(&mut self, i128);
+    fn read_u8(&mut self, u8);
+    fn read_u16_le(&mut self, u16);
+    fn read_u32_le(&mut self, u32);
+    fn read_u64_le(&mut self, u64);
+    fn read_u128_le(&mut self, u128);
+}
+
+macro_rules! awrite_ext {
+    ($(fn $name:ident(&mut self, $ty:ty);)* $(;)?) => {
+        pub trait AsyncWriteExt {$(
+            fn $name(&mut self, value: $ty) -> impl Future<Output = io::Result<()>>;
+        )*}
+        impl<W: futures_io::AsyncWrite + std::marker::Unpin> AsyncWriteExt for W {$(
+            async fn $name(&mut self, value: $ty) -> io::Result<()> {
+                use futures_util::AsyncWriteExt as _;
+                self.write_all(&value.to_le_bytes()).await
+            }
+        )*}
+    };
+}
+#[cfg(feature = "futures")]
+awrite_ext! {
+    fn write_i8(&mut self, i8);
+    fn write_i16_le(&mut self, i16);
+    fn write_i32_le(&mut self, i32);
+    fn write_i64_le(&mut self, i64);
+    fn write_i128_le(&mut self, i128);
+    fn write_u8(&mut self, u8);
+    fn write_u16_le(&mut self, u16);
+    fn write_u32_le(&mut self, u32);
+    fn write_u64_le(&mut self, u64);
+    fn write_u128_le(&mut self, u128);
+}
+
+macro_rules! aread_ext {
+    ($(fn $name:ident(&mut self, $ty:ty);)* $(;)?) => {
+        pub trait AsyncReadExt {$(
+            fn $name(&mut self) -> impl Future<Output = io::Result<$ty>>;
+        )*}
+        impl<R: futures_io::AsyncRead + std::marker::Unpin> AsyncReadExt for R {$(
+            async fn $name(&mut self) -> io::Result<$ty> {
+                use futures_util::AsyncReadExt as _;
+                let mut buf = [0; size_of::<$ty>()];
+                self.read_exact(&mut buf).await?;
+                Ok(<$ty>::from_le_bytes(buf))
+            }
+        )*}
+    };
+}
+#[cfg(feature = "futures")]
+aread_ext! {
     fn read_i8(&mut self, i8);
     fn read_i16_le(&mut self, i16);
     fn read_i32_le(&mut self, i32);

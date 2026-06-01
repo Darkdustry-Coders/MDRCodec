@@ -28,7 +28,7 @@ impl<W: Write> Write for CountingWrite<W> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum Compression {
     /// No compression.
     None,
@@ -234,38 +234,37 @@ impl Compression {
     }
 
     pub fn write<W: Write>(&self, mut to: W) -> io::Result<()> {
-        to.write_all(&[self.ordinal()])?;
+        use crate::io::WriteExt as _;
+
+        to.write_u8(self.ordinal())?;
         match self {
             Self::None => (),
             #[cfg(feature = "lz4")]
             Self::Lz4 { mode } => match mode {
                 lz4::block::CompressionMode::HIGHCOMPRESSION(x) => {
-                    let mut buf = [2; 5];
-                    buf[1..][..4].copy_from_slice(&x.to_le_bytes());
-                    to.write_all(&buf)?;
+                    to.write_u8(2)?;
+                    to.write_i32_le(*x)?;
                 }
                 lz4::block::CompressionMode::FAST(x) => {
-                    let mut buf = [1; 5];
-                    buf[1..][..4].copy_from_slice(&x.to_le_bytes());
-                    to.write_all(&buf)?;
+                    to.write_u8(1)?;
+                    to.write_i32_le(*x)?;
                 }
                 lz4::block::CompressionMode::DEFAULT => {
-                    to.write_all(&[0])?;
+                    to.write_u8(0)?;
                 }
             },
             #[cfg(feature = "flate2")]
             Self::Deflate { quality } | Self::Zlib { quality } | Self::Gzip { quality } => {
-                to.write_all(&quality.level().to_le_bytes())?;
+                to.write_u32_le(quality.level())?;
             }
         }
         Ok(())
     }
 
     pub fn read<R: Read>(mut from: R) -> io::Result<Self> {
-        let mut version = [0];
-        from.read_exact(&mut version)?;
+        use crate::io::ReadExt as _;
 
-        match version[0] {
+        match from.read_u8()? {
             0 => Ok(Self::None),
 
             #[cfg(not(feature = "lz4"))]
@@ -275,15 +274,10 @@ impl Compression {
             )),
             #[cfg(feature = "lz4")]
             1 => {
-                let mut buf = [0; 5];
-                from.read_exact(&mut buf)?;
-                let mut num = [0; 4];
-                num.copy_from_slice(&buf[1..]);
-                let num = i32::from_le_bytes(num);
                 Ok(Self::Lz4 {
-                    mode: match buf[0] {
-                        2 => lz4::block::CompressionMode::HIGHCOMPRESSION(num),
-                        1 => lz4::block::CompressionMode::FAST(num),
+                    mode: match from.read_u8()? {
+                        2 => lz4::block::CompressionMode::HIGHCOMPRESSION(from.read_i32_le()?),
+                        1 => lz4::block::CompressionMode::FAST(from.read_i32_le()?),
                         0 => lz4::block::CompressionMode::DEFAULT,
                         x => {
                             return Err(io::Error::new(
@@ -302,11 +296,7 @@ impl Compression {
             )),
             #[cfg(feature = "flate2")]
             2 => Ok(Self::Deflate {
-                quality: {
-                    let mut buf = [0; 4];
-                    from.read_exact(&mut buf)?;
-                    flate2::Compression::new(u32::from_le_bytes(buf))
-                },
+                quality: flate2::Compression::new(from.read_u32_le()?),
             }),
 
             #[cfg(not(feature = "flate2"))]
@@ -316,11 +306,7 @@ impl Compression {
             )),
             #[cfg(feature = "flate2")]
             3 => Ok(Self::Zlib {
-                quality: {
-                    let mut buf = [0; 4];
-                    from.read_exact(&mut buf)?;
-                    flate2::Compression::new(u32::from_le_bytes(buf))
-                },
+                quality: flate2::Compression::new(from.read_u32_le()?),
             }),
 
             #[cfg(not(feature = "flate2"))]
@@ -330,11 +316,102 @@ impl Compression {
             )),
             #[cfg(feature = "flate2")]
             4 => Ok(Self::Gzip {
-                quality: {
-                    let mut buf = [0; 4];
-                    from.read_exact(&mut buf)?;
-                    flate2::Compression::new(u32::from_le_bytes(buf))
-                },
+                quality: flate2::Compression::new(from.read_u32_le()?),
+            }),
+
+            x => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Unsupported compression format: {x}"),
+            )),
+        }
+    }
+
+    #[cfg(feature = "futures")]
+    pub async fn write_async<W: futures_io::AsyncWrite + std::marker::Unpin>(&self, mut to: W) -> io::Result<()> {
+        use crate::io::AsyncWriteExt as _;
+
+        to.write_u8(self.ordinal()).await?;
+        match self {
+            Self::None => (),
+            #[cfg(feature = "lz4")]
+            Self::Lz4 { mode } => match mode {
+                lz4::block::CompressionMode::HIGHCOMPRESSION(x) => {
+                    to.write_u8(2).await?;
+                    to.write_i32_le(*x).await?;
+                }
+                lz4::block::CompressionMode::FAST(x) => {
+                    to.write_u8(1).await?;
+                    to.write_i32_le(*x).await?;
+                }
+                lz4::block::CompressionMode::DEFAULT => {
+                    to.write_u8(0).await?;
+                }
+            },
+            #[cfg(feature = "flate2")]
+            Self::Deflate { quality } | Self::Zlib { quality } | Self::Gzip { quality } => {
+                to.write_u32_le(quality.level()).await?;
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "futures")]
+    pub async fn read_async<R: futures_io::AsyncRead + std::marker::Unpin>(mut from: R) -> io::Result<Self> {
+        use crate::io::AsyncReadExt as _;
+
+        match from.read_u8().await? {
+            0 => Ok(Self::None),
+
+            #[cfg(not(feature = "lz4"))]
+            1 => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Feature 'lz4' must be enabled to handle lz4 compression",
+            )),
+            #[cfg(feature = "lz4")]
+            1 => {
+                Ok(Self::Lz4 {
+                    mode: match from.read_u8().await? {
+                        2 => lz4::block::CompressionMode::HIGHCOMPRESSION(from.read_i32_le().await?),
+                        1 => lz4::block::CompressionMode::FAST(from.read_i32_le().await?),
+                        0 => lz4::block::CompressionMode::DEFAULT,
+                        x => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!("Unsupported lz4 compression mode: {x}"),
+                            ));
+                        }
+                    },
+                })
+            }
+
+            #[cfg(not(feature = "flate2"))]
+            2 => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Feature 'flate2' must be enabled to handle deflate compression",
+            )),
+            #[cfg(feature = "flate2")]
+            2 => Ok(Self::Deflate {
+                quality: flate2::Compression::new(from.read_u32_le().await?),
+            }),
+
+            #[cfg(not(feature = "flate2"))]
+            3 => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Feature 'flate2' must be enabled to handle zlib compression",
+            )),
+            #[cfg(feature = "flate2")]
+            3 => Ok(Self::Zlib {
+                quality: flate2::Compression::new(from.read_u32_le().await?),
+            }),
+
+            #[cfg(not(feature = "flate2"))]
+            4 => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Feature 'flate2' must be enabled to handle gzip compression",
+            )),
+            #[cfg(feature = "flate2")]
+            4 => Ok(Self::Gzip {
+                quality: flate2::Compression::new(from.read_u32_le().await?),
             }),
 
             x => Err(io::Error::new(

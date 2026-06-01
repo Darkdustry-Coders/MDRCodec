@@ -4,6 +4,12 @@
 pub enum ChunkKind {
     /// A jump table.
     Jmp,
+    /// A map snapshot table.
+    Map,
+    /// An ID table.
+    Id,
+    /// A modifications table chunk.
+    Mod,
 }
 impl ChunkKind {
     /// Get a numeric name of the chunk.
@@ -12,6 +18,9 @@ impl ChunkKind {
     pub const fn ordinal(&self) -> u8 {
         match self {
             Self::Jmp => 1,
+            Self::Map => 2,
+            Self::Id => 3,
+            Self::Mod => 4,
         }
     }
 
@@ -22,6 +31,9 @@ impl ChunkKind {
     pub const fn from_ordinal(value: u8) -> Result<ChunkKind, u8> {
         match value {
             1 => Ok(ChunkKind::Jmp),
+            2 => Ok(ChunkKind::Map),
+            3 => Ok(ChunkKind::Id),
+            4 => Ok(ChunkKind::Mod),
             x => Err(x),
         }
     }
@@ -84,7 +96,7 @@ impl World {
 
         unsafe {
             let idx = width as usize + (height as usize * self.width as usize);
-            return Some(self.tiles.add(idx).as_ref().unwrap());
+            Some(self.tiles.add(idx).as_ref().unwrap())
         }
     }
 

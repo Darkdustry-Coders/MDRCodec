@@ -2,7 +2,7 @@
 
 A codec for Mindurka's replay format.
 
-> [:WARN:]
+> [!WARNING]
 > Hazmat suit on!
 >
 > This project is incredible WIP and the project in this state may not even work!

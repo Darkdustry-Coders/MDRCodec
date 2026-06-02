@@ -37,6 +37,15 @@ unsafe extern "C" fn mdrcoder_basic_encoder_write_map_raw(this: *mut SeekingEnco
 }
 
 #[unsafe(no_mangle)]
+unsafe extern "C" fn mdrcoder_basic_encoder_write_id_raw(this: *mut SeekingEncoder<BufWriter<File>>, data: *const u8, len: usize) {
+    unsafe {
+        let this = this.as_mut().unwrap();
+        let data = data.as_ref().unwrap();
+        this.write_id_raw(slice::from_raw_parts(data, len)).unwrap();
+    }
+}
+
+#[unsafe(no_mangle)]
 unsafe extern "C" fn mdrcoder_basic_encoder_drop(ptr: *mut SeekingEncoder<BufWriter<File>>) {
     unsafe { Box::from_raw(ptr).flush().expect("flush failed"); }
 }

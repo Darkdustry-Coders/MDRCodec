@@ -2,7 +2,9 @@ package buj.mdrcoderri;
 
 import java.nio.ByteOrder;
 
+import arc.struct.Seq;
 import mindustry.Vars;
+import mindustry.ctype.MappableContent;
 
 /**
  * Encoder with 'Seek' support.
@@ -14,6 +16,48 @@ public class StreamingEncoder implements AutoCloseable {
     StreamingEncoder(long encoder, LibMdrCodec lib) {
         this.encoder = encoder;
         this.lib = lib;
+
+        writeIdSnapshot(Vars.content.blocks());
+        writeIdSnapshot(Vars.content.items());
+        writeIdSnapshot(Vars.content.units());
+        writeIdSnapshot(Vars.content.unitCommands());
+        writeIdSnapshot(Vars.content.unitStances());
+        writeIdSnapshot(Vars.content.items());
+        writeIdSnapshot(Vars.content.liquids());
+        writeIdSnapshot(Vars.content.weathers());
+        writeMapSnapshot();
+    }
+
+    private <T extends MappableContent> long idSnapshotLength(Seq<T> content) {
+        var length = new CalcLength();
+
+        length.addByte();
+
+        content.each(x -> {
+            length.addShort();
+            length.addByte();
+            var name = x.name.getBytes(Vars.charset);
+            assert name.length < 256;
+            length.length += name.length;
+        });
+
+        return length.length;
+    }
+    private <T extends MappableContent> void writeIdSnapshot(Seq<T> content) {
+        long len = idSnapshotLength(content);
+        long address = LibC.malloc(len);
+        final var buf = LibC.directBuffer(address, (int) len).order(ByteOrder.LITTLE_ENDIAN);
+
+        buf.put((byte) content.first().getContentType().ordinal());
+
+        content.each(x -> {
+            buf.putShort(x.id);
+            var name = x.name.getBytes(Vars.charset);
+            buf.put((byte) name.length);
+            buf.put(name);
+        });
+
+        Try.v(() -> Main.libmdrcodec.mdrcoderBasicEncoderWriteIdRaw(encoder, address, len));
     }
 
     long mapSnapshotLength() {

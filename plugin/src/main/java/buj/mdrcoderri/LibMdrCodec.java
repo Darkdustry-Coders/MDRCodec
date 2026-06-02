@@ -13,6 +13,7 @@ public class LibMdrCodec {
     private final MethodHandle mdrcoderBasicEncoderNew;
     private final MethodHandle mdrcoderBasicEncoderWriteMap;
     private final MethodHandle mdrcoderBasicEncoderWriteMapRaw;
+    private final MethodHandle mdrcoderBasicEncoderWriteIdRaw;
     private final MethodHandle mdrcoderBasicEncoderDrop;
 
     public LibMdrCodec() throws UnsatisfiedLinkError {
@@ -29,6 +30,10 @@ public class LibMdrCodec {
                 SymbolLookup.loaderLookup().lookup("mdrcoder_basic_encoder_write_map_raw").orElseThrow(),
                 MethodType.methodType(void.class, long.class, long.class, long.class),
                 FunctionDescriptor.ofVoid(CLinker.C_LONG, CLinker.C_LONG, CLinker.C_LONG));
+        mdrcoderBasicEncoderWriteIdRaw = Main.link.downcallHandle(
+                SymbolLookup.loaderLookup().lookup("mdrcoder_basic_encoder_write_id_raw").orElseThrow(),
+                MethodType.methodType(void.class, long.class, long.class, long.class),
+                FunctionDescriptor.ofVoid(CLinker.C_LONG, CLinker.C_LONG, CLinker.C_LONG));
         mdrcoderBasicEncoderDrop = Main.link.downcallHandle(
                 SymbolLookup.loaderLookup().lookup("mdrcoder_basic_encoder_drop").orElseThrow(),
                 MethodType.methodType(void.class, long.class),
@@ -38,7 +43,7 @@ public class LibMdrCodec {
     /**
      * Create a new encoder.
      */
-    public StreamingEncoder openEncoder(RandomAccessFile file) throws Throwable {
+    public StreamingEncoder startRecording(RandomAccessFile file) throws Throwable {
         int fd = Reflect.get(file.getFD(), "fd");
         return new StreamingEncoder((long) mdrcoderBasicEncoderNew.invokeWithArguments(fd), this);
     }
@@ -58,6 +63,16 @@ public class LibMdrCodec {
      */
     void mdrcoderBasicEncoderWriteMapRaw(long encoder, long data, long length) throws Throwable {
         mdrcoderBasicEncoderWriteMapRaw.invokeWithArguments(encoder, data, length);
+    }
+
+    /**
+     * Write a raw ID chunk.
+     *
+     * Data in the provided slice must be a valid ID chunk, otherwise the file may
+     * get corrupted.
+     */
+    void mdrcoderBasicEncoderWriteIdRaw(long encoder, long data, long length) throws Throwable {
+        mdrcoderBasicEncoderWriteIdRaw.invokeWithArguments(encoder, data, length);
     }
 
     /**

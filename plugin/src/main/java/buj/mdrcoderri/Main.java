@@ -45,8 +45,7 @@ public class Main extends Plugin {
             final var fi = new Ref<>(Vars.dataDirectory.child("records"));
             if (!fi.r.exists()) fi.r.mkdirs();
             fi.r = fi.r.child(str);
-            encoder = Try.x(() -> libmdrcodec.openEncoder(new RandomAccessFile(fi.r.file(), "rw")));
-            encoder.writeMapSnapshot();
+            encoder = Try.x(() -> libmdrcodec.startRecording(new RandomAccessFile(fi.r.file(), "rw")));
         });
 
         Events.on(ResetEvent.class, event -> {

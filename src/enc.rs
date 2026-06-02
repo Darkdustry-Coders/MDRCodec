@@ -848,6 +848,43 @@ impl<W> Encoder<W> {
         Ok(())
     }
 
+    /// Write ID chunk using raw data.
+    ///
+    /// ## Safety
+    ///
+    /// The caller must ensure that the passed data is a valid ID chunk body.
+    ///
+    /// If not, the file may become unparseable.
+    pub unsafe fn write_id_raw(&mut self, map: &[u8]) -> io::Result<()> {
+        self.flush_mod()?;
+
+        self.write_chunk(ChunkKind::Id, self.timestamp(), map)?;
+
+        Ok(())
+    }
+
+    /// Write ID chunk using raw data.
+    ///
+    /// ## Safety
+    ///
+    /// The caller must ensure that the passed data is a valid ID chunk body.
+    ///
+    /// If not, the file may become unparseable.
+    ///
+    /// ## Cancellation safety
+    ///
+    /// This method is *not* cancel-safe. Cancelling this method may
+    /// result in broken chunks, as well as corrupting the internal
+    /// buffer, making the file unreadable.
+    #[cfg(feature = "futures")]
+    pub async unsafe fn write_id_raw_async(&mut self, map: &[u8]) -> io::Result<()> {
+        self.flush_mod_async().await?;
+
+        self.write_chunk_async(ChunkKind::Id, self.timestamp(), map).await?;
+
+        Ok(())
+    }
+
     /// Flush modifications data.
     fn flush_mod(&mut self) -> io::Result<()> {
         self.expect_features(false)?;

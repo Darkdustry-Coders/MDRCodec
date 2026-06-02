@@ -96,10 +96,11 @@ Unitv1:
 
 IdChunkv1: (Chunk.{ body = Compressed<IdChunkv1Body>, kind = 3 })
 IdChunkv1Body:
+    (u8: content type, see [[Content Types]])
     (IdChunkv1Record[])
 IdChunkv1Record:
     (u16le(id): recorded id)
-    (u16le(strlen))
+    (u8(strlen))
     (byte[strlen](name): record name)
 
 ModChunkv1: (Chunk.{ body = Compressed<ModChunkv1Body>, kind = 4 })
@@ -140,6 +141,14 @@ Typically a file would have a structure of
 (CompressionSettings)
 (JmpChunkv1)
 (IdChunkv1)
+(IdChunkv1)
+...
+(IdChunkv1)
 (MapChunkv1)
 ...
 ```
+
+## Content Types
+- 0: item
+- 1: block
+- 6: unit type

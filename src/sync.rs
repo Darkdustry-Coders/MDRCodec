@@ -35,6 +35,19 @@ impl<W: Write> StreamingEncoder<W> {
             self.inner.write_map_raw(map)
         }
     }
+    
+    /// Write ID chunk using raw data.
+    ///
+    /// ## Safety
+    ///
+    /// The caller must ensure that the passed data is a valid ID chunk body.
+    ///
+    /// If not, the file may become unparseable.
+    pub unsafe fn write_id_raw(&mut self, map: &[u8]) -> io::Result<()> {
+        unsafe {
+            self.inner.write_id_raw(map)
+        }
+    }
 
     /// Flush the buffers.
     ///
@@ -75,6 +88,19 @@ impl<W: Write + Seek> SeekingEncoder<W> {
     pub unsafe fn write_map_raw(&mut self, map: &[u8]) -> io::Result<()> {
         unsafe {
             self.inner.write_map_raw(map)
+        }
+    }
+    
+    /// Write ID chunk using raw data.
+    ///
+    /// ## Safety
+    ///
+    /// The caller must ensure that the passed data is a valid ID chunk body.
+    ///
+    /// If not, the file may become unparseable.
+    pub unsafe fn write_id_raw(&mut self, map: &[u8]) -> io::Result<()> {
+        unsafe {
+            self.inner.write_id_raw(map)
         }
     }
 
@@ -118,6 +144,19 @@ impl<W: TryClone + Write + Seek> CloningEncoder<W> {
     pub unsafe fn write_map_raw(&mut self, map: &[u8]) -> io::Result<()> {
         unsafe {
             self.inner.write_map_raw(map)
+        }
+    }
+    
+    /// Write ID chunk using raw data.
+    ///
+    /// ## Safety
+    ///
+    /// The caller must ensure that the passed data is a valid ID chunk body.
+    ///
+    /// If not, the file may become unparseable.
+    pub unsafe fn write_id_raw(&mut self, map: &[u8]) -> io::Result<()> {
+        unsafe {
+            self.inner.write_id_raw(map)
         }
     }
 

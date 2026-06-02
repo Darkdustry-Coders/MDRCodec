@@ -1,5 +1,6 @@
 pub mod data;
 pub mod dec;
+pub mod ffi;
 #[cfg(feature = "futures")]
 pub mod future;
 pub mod enc;

@@ -4,7 +4,7 @@
 //! have proper typing, consider using [crate::sync] or [crate::future].
 
 use std::{
-    borrow::Cow, io::{self, Seek, Write}, marker::PhantomData, mem::transmute, time::{Duration, Instant}
+    borrow::Cow, io::{self, Cursor, Seek, Write}, marker::PhantomData, mem::transmute, time::{Duration, Instant}
 };
 
 #[cfg(feature = "futures")]
@@ -13,7 +13,7 @@ use futures_io::{AsyncSeek, AsyncWrite};
 use futures_util::{AsyncSeekExt, AsyncWriteExt};
 
 use crate::{
-    data::ChunkKind,
+    data::{ChunkKind, TileAccess, WorldAccess},
     io::{GenericIo, TryClone, WriteExt},
     opt::Compression,
 };
@@ -478,6 +478,11 @@ impl<W> Encoder<W> {
         Duration::from_millis(self.snapshot_rate)
     }
 
+    #[must_use]
+    fn timestamp(&self) -> u64 {
+        self.epoch.elapsed().as_millis() as u64
+    }
+
     /// Check availability and consistency of features.
     fn expect_features(&self, r#async: bool) -> io::Result<()> {
         if !r#async && !self.is_sync() {
@@ -576,6 +581,7 @@ impl<W> Encoder<W> {
                         write.write_u8(name.ordinal())?;
                         write.write_u64_le(timestamp)?;
                         write.write_u64_le(this_pos)?;
+                        write.flush()?;
                         sseek!(self).seek(io::SeekFrom::Start(this_pos))?;
 
                         false
@@ -588,6 +594,7 @@ impl<W> Encoder<W> {
                         write.write_u8(name.ordinal())?;
                         write.write_u64_le(timestamp)?;
                         write.write_u64_le(this_pos)?;
+                        write.flush()?;
 
                         false
                     } else { true }
@@ -602,6 +609,7 @@ impl<W> Encoder<W> {
                 write.write_u32_le(self.jmptable_zeroes.len() as u32)?;
                 write.write_u64_le(timestamp)?;
                 write.write_u64_le(prev_jmpt)?;
+                write.flush()?;
 
                 self.jmptable_at_ptr = this_pos;
                 self.jmptable_last_ts = timestamp;
@@ -615,15 +623,19 @@ impl<W> Encoder<W> {
             }
         }
 
+        let mut buf = vec![];
+        self.compression.write_data(Cursor::new(&mut buf), data)?;
+
         let mut write = swrite!(self);
         write.write_u8(name.ordinal())?;
         write.write_u64_le(timestamp)?;
-        write.write_u32_le(data.len() as u32)?;
-        write.write_all(data)?;
+        write.write_u32_le(buf.len() as u32)?;
+        write.write_all(&buf)?;
         write.write_u8(name.ordinal())?;
-        write.write_u32_le(data.len() as u32)?;
+        write.write_u32_le(buf.len() as u32)?;
         write.write_u64_le(timestamp)?;
         write.write_u64_le(self.jmptable_at_ptr)?;
+        write.flush()?;
 
         Ok(())
     }
@@ -648,6 +660,7 @@ impl<W> Encoder<W> {
         data: &[u8],
     ) -> io::Result<()> {
         use futures_util::AsyncWriteExt as _;
+        use crate::io::AsyncWriteExt as _;
 
         self.expect_features(true)?;
 
@@ -665,22 +678,180 @@ impl<W> Encoder<W> {
             ));
         }
 
-        let mut header = [0; 1 + 8 + 4];
-        header[0] = name.ordinal();
-        header[1..][..8].copy_from_slice(&timestamp.to_le_bytes());
-        header[1 + 8..][..4].copy_from_slice(&(data.len() as u32).to_le_bytes());
+        if self.can_make_jmpt() {
+            let this_pos = aseek!(self).stream_position().await?;
+            let prev_jmpt = self.jmptable_at_ptr;
 
-        awrite!(self).write_all(&header).await?;
-        awrite!(self).write_all(data).await?;
-        awrite!(self)
-            .write_all(&(data.len() as u32).to_le_bytes())
-            .await?;
+            if match &mut self.jmptable_at {
+                JmpTableImpl::None => true,
+                JmpTableImpl::Addr(addr) => {
+                    if self.jmptable_remaining > 0 {
+                        self.jmptable_remaining -= 1;
+                        aseek!(self).seek(io::SeekFrom::Start(*addr)).await?;
+                        let mut write = awrite!(self);
+                        write.write_u8(name.ordinal()).await?;
+                        write.write_u64_le(timestamp).await?;
+                        write.write_u64_le(this_pos).await?;
+                        write.flush().await?;
+                        aseek!(self).seek(io::SeekFrom::Start(this_pos)).await?;
+
+                        false
+                    } else { true }
+                },
+                JmpTableImpl::File(io) => {
+                    if self.jmptable_remaining > 0 {
+                        self.jmptable_remaining -= 1;
+                        let mut write = io.async_writeable().unwrap();
+                        write.write_u8(name.ordinal()).await?;
+                        write.write_u64_le(timestamp).await?;
+                        write.write_u64_le(this_pos).await?;
+                        write.flush().await?;
+
+                        false
+                    } else { true }
+                }
+            } {
+                let mut write = awrite!(self);
+                write.write_u8(ChunkKind::Jmp.ordinal()).await?;
+                write.write_u64_le(timestamp).await?;
+                write.write_u32_le(self.jmptable_zeroes.len() as u32).await?;
+                write.write_all(&self.jmptable_zeroes).await?;
+                write.write_u8(ChunkKind::Jmp.ordinal()).await?;
+                write.write_u32_le(self.jmptable_zeroes.len() as u32).await?;
+                write.write_u64_le(timestamp).await?;
+                write.write_u64_le(prev_jmpt).await?;
+                write.flush().await?;
+
+                self.jmptable_at_ptr = this_pos;
+                self.jmptable_last_ts = timestamp;
+                self.jmptable_remaining = self.jmptable_size;
+
+                if let Some(new_io) = self.write.try_clone() {
+                    self.jmptable_at = JmpTableImpl::File(new_io?);
+                } else {
+                    self.jmptable_at = JmpTableImpl::Addr(self.jmptable_at_ptr);
+                }
+            }
+        }
+
+        let buf = if matches!(self.compression, Compression::None) {
+            Cow::Borrowed(data)
+        } else {
+            let mut buf = vec![];
+            self.compression.write_data(Cursor::new(&mut buf), data)?;
+            Cow::Owned(buf)
+        };
+
+        let mut write = awrite!(self);
+        write.write_u8(name.ordinal()).await?;
+        write.write_u64_le(timestamp).await?;
+        write.write_u32_le(buf.len() as u32).await?;
+        write.write_all(&buf).await?;
+        write.write_u8(name.ordinal()).await?;
+        write.write_u32_le(buf.len() as u32).await?;
+        write.write_u64_le(timestamp).await?;
+        write.write_u64_le(self.jmptable_at_ptr).await?;
+        write.flush().await?;
+
+        Ok(())
+    }
+
+    /// Write MAP chunk.
+    pub fn write_map<M: WorldAccess>(&mut self, map: M) -> io::Result<()> {
+        self.flush_mod()?;
+
+        let mut buf = Cursor::new(vec![]);
+        buf.write_u32_le(map.width())?;
+        buf.write_u32_le(map.height())?;
+        for y in 0..map.height() { for x in 0..map.width() {
+            let tile = map.tile(x, y).unwrap();
+            buf.write_u16_le(tile.block())?;
+            buf.write_u16_le(tile.floor())?;
+            buf.write_u16_le(tile.overlay())?;
+            buf.write_u8(tile.data_block())?;
+            buf.write_u8(tile.data_floor())?;
+            buf.write_u8(tile.data_overlay())?;
+            buf.write_u32_le(tile.data_extra())?;
+            buf.write_u8(0)?;
+        } }
+
+        self.write_chunk(ChunkKind::Map, self.timestamp(), &buf.into_inner())?;
+
+        Ok(())
+    }
+
+    /// Write MAP chunk.
+    ///
+    /// ## Cancellation safety
+    ///
+    /// This method is *not* cancel-safe. Cancelling this method may
+    /// result in broken chunks, as well as corrupting the internal
+    /// buffer, making the file unreadable.
+    #[cfg(feature = "futures")]
+    pub async fn write_map_async<M: WorldAccess>(&mut self, map: M) -> io::Result<()> {
+        self.flush_mod_async().await?;
+
+        let mut buf = Cursor::new(vec![]);
+        buf.write_u32_le(map.width())?;
+        buf.write_u32_le(map.height())?;
+        for y in 0..map.height() { for x in 0..map.width() {
+            let tile = map.tile(x, y).unwrap();
+            buf.write_u16_le(tile.block())?;
+            buf.write_u16_le(tile.floor())?;
+            buf.write_u16_le(tile.overlay())?;
+            buf.write_u8(tile.data_block())?;
+            buf.write_u8(tile.data_floor())?;
+            buf.write_u8(tile.data_overlay())?;
+            buf.write_u32_le(tile.data_extra())?;
+            buf.write_u8(0)?;
+        } }
+
+        self.write_chunk_async(ChunkKind::Map, self.timestamp(), &buf.into_inner()).await?;
+
+        Ok(())
+    }
+
+    /// Write MAP chunk using raw data.
+    ///
+    /// ## Safety
+    ///
+    /// The caller must ensure that the passed data is a valid MAP chunk body.
+    ///
+    /// If not, the file may become unparseable.
+    pub unsafe fn write_map_raw(&mut self, map: &[u8]) -> io::Result<()> {
+        self.flush_mod()?;
+
+        self.write_chunk(ChunkKind::Map, self.timestamp(), map)?;
+
+        Ok(())
+    }
+
+    /// Write MAP chunk using raw data.
+    ///
+    /// ## Safety
+    ///
+    /// The caller must ensure that the passed data is a valid MAP chunk body.
+    ///
+    /// If not, the file may become unparseable.
+    ///
+    /// ## Cancellation safety
+    ///
+    /// This method is *not* cancel-safe. Cancelling this method may
+    /// result in broken chunks, as well as corrupting the internal
+    /// buffer, making the file unreadable.
+    #[cfg(feature = "futures")]
+    pub async unsafe fn write_map_raw_async(&mut self, map: &[u8]) -> io::Result<()> {
+        self.flush_mod_async().await?;
+
+        self.write_chunk_async(ChunkKind::Map, self.timestamp(), map).await?;
 
         Ok(())
     }
 
     /// Flush modifications data.
     fn flush_mod(&mut self) -> io::Result<()> {
+        self.expect_features(false)?;
+
         if self.mod_act_len > 0 {
             // Safety: `write_chunk` never modifies this buffer, so it's safe.
             let buffer: &'static [u8] = unsafe { transmute(&self.mod_act_buffer[0..self.mod_act_len]) };
@@ -700,6 +871,8 @@ impl<W> Encoder<W> {
     /// buffer, making the file unreadable.
     #[cfg(feature = "futures")]
     async fn flush_mod_async(&mut self) -> io::Result<()> {
+        self.expect_features(true)?;
+
         if self.mod_act_len > 0 {
             // Safety: `write_chunk_async` never modifies this buffer, so it's safe.
             //         While it's possible that this method gets cancelled and another write
@@ -714,19 +887,29 @@ impl<W> Encoder<W> {
     }
 
     /// Flush all written data.
+    ///
+    /// If there are unsaved modifications, a new MOD chunk will be created,
+    /// alongside all other required chunks.
     pub fn flush(&mut self) -> io::Result<()> {
-        self.expect_features(false)?;
+        self.flush_mod()?;
         swrite!(self).flush()
     }
 
     /// Flush all written data.
     ///
-    /// Simply triggers the underlying [AsyncWriteExt::flush].
+    /// If there are unsaved modifications, a new MOD chunk will be created,
+    /// alongside all other required chunks.
+    ///
+    /// ## Cancellation safety
+    ///
+    /// This method is *not* cancel-safe. Cancelling this method may
+    /// result in broken chunks, as well as corrupting the internal
+    /// buffer, making the file unreadable.
     #[cfg(feature = "futures")]
     pub async fn flush_async(&mut self) -> io::Result<()> {
         use futures_util::AsyncWriteExt as _;
 
-        self.expect_features(true)?;
+        self.flush_mod_async().await?;
         awrite!(self).flush().await
     }
 }

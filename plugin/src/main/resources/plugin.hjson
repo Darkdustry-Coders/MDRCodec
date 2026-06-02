@@ -1,0 +1,5 @@
+name: MDRCodecPlugin
+author: buj
+main: buj.mdrcoderri.Main
+description: Reference implementation for MDRCodec
+version: 1.0

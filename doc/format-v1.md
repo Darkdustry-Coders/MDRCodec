@@ -71,7 +71,7 @@ JmpChunkv1Record:
     (u64le: file pointer)
     (u8(validity))
 
-MapChunkv1: (Chunk.{ body = MapChunkv1Body, kind = 2 })
+MapChunkv1: (Chunk.{ body = Compressed<MapChunkv1Body>, kind = 2 })
 MapChunkv1Body:
     (u32le(width))
     (u32le(height))
@@ -82,25 +82,55 @@ Tilev1:
     (u16le(block))
     (u16le(floor))
     (u16le(overlay))
-    (u8(team))
     (u8(data_block))
     (u8(data_floor))
     (u8(data_overlay))
     (u32le(data_extra))
     (u8(has_building) = 0: reserved)
 Unitv1:
+    (u32(id))
     (u16le(type))
     (f32le(x))
     (f32le(y))
     (u8(rotation): rotation in 256-edge degrees)
 
-IdChunkv1: (Chunk.{ body = IdChunkv1Body, kind = 3 })
+IdChunkv1: (Chunk.{ body = Compressed<IdChunkv1Body>, kind = 3 })
 IdChunkv1Body:
     (IdChunkv1Record[])
 IdChunkv1Record:
     (u16le(id): recorded id)
     (u16le(strlen))
     (byte[strlen](name): record name)
+
+ModChunkv1: (Chunk.{ body = Compressed<ModChunkv1Body>, kind = 4 })
+ModChunkv1Body:
+    (ModChunkv1Record[])
+ModChunkv1Record:
+    (u32(dts): duration since the previous change or record timestamp)
+    (u8(kind): change id)
+    {
+        if kind == 0,
+            << noop, no data >>
+            ,
+        if kind == 1,
+            << unit moved >>
+            (u32(unit_id))
+            (f32le(x))
+            (f32le(y))
+            ,
+        if kind == 2,
+            << unit rotation changed >>
+            (u32(unit_id))
+            (u8(rotation))
+            ,
+        else (unreachable)
+    }
+
+## Compressed content.
+##
+## The actual contents depend on compression settings.
+Compressed<T>:
+    (byte[]: compressed contents)
 ```
 
 Typically a file would have a structure of

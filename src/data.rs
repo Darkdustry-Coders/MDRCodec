@@ -63,48 +63,34 @@ impl ChunkKind {
 //     unsafe fn realloc(ptr: *mut c_void, new_length: usize) -> *mut c_void;
 // }
 
-#[repr(C)]
-pub struct Building {
-    pub item_types: *const [u16],
-    pub item_counts: *const [u32],
-    pub item_count: u16,
+pub struct ItemStack {
+    pub id: u16,
+    pub count: i32,
 }
 
-#[repr(C)]
-pub struct Tile {
-    pub building: *const Building,
-    pub data_extra: u32,
-    pub block: u16,
-    pub floor: u16,
-    pub overlay: u16,
-    pub data_block: u8,
-    pub data_floor: u8,
-    pub data_overlay: u8,
+pub trait BuildingAccess {
+    fn item_count(&self) -> usize;
+    fn item(&self, idx: usize) -> Option<ItemStack>;
 }
 
-#[repr(C)]
-pub struct World {
-    tiles: *const Tile,
-    width: u32,
-    height: u32,
+pub trait TileAccess {
+    type BA<'a>: BuildingAccess + 'a where Self: 'a;
+    fn building(&self) -> Option<Self::BA<'_>>;
+
+    fn block(&self) -> u16;
+    fn floor(&self) -> u16;
+    fn overlay(&self) -> u16;
+    fn data_block(&self) -> u8;
+    fn data_floor(&self) -> u8;
+    fn data_overlay(&self) -> u8;
+    fn data_extra(&self) -> u32;
 }
-impl World {
-    pub const fn tile(&self, width: i32, height: i32) -> Option<&Tile> {
-        if width < 0 || height < 0 || width as u32 > self.width || height as u32 > self.height {
-            return None;
-        }
 
-        unsafe {
-            let idx = width as usize + (height as usize * self.width as usize);
-            Some(self.tiles.add(idx).as_ref().unwrap())
-        }
-    }
+pub trait WorldAccess {
+    fn width(&self) -> u32;
+    fn height(&self) -> u32;
 
-    pub const fn width(&self) -> u32 {
-        self.width
-    }
-
-    pub const fn height(&self) -> u32 {
-        self.height
-    }
+    type BA<'a>: BuildingAccess + 'a where Self: 'a;
+    type TA<'a>: TileAccess<BA<'a> = Self::BA<'a>> + 'a where Self: 'a;
+    fn tile(&self, x: u32, y: u32) -> Option<Self::TA<'_>>;
 }

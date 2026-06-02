@@ -9,7 +9,7 @@
 use std::pin::pin;
 use std::{
     fs::File,
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, BufWriter, Read, Seek, SeekFrom, Write},
     net::{TcpListener, TcpStream, UdpSocket},
 };
 
@@ -103,7 +103,7 @@ pub trait AsRawHandle {
 /// If you're not sure, use the [RawFileHandle::into_inner] method.
 #[repr(transparent)]
 #[derive(Clone, Copy)]
-pub struct RawFileHandle(#[cfg(unix)] i32, #[cfg(windows)] Handle);
+pub struct RawFileHandle(#[cfg(unix)] i32, #[cfg(target_os = "windows")] Handle);
 impl RawFileHandle {
     /// Get the actual file handle.
     #[cfg(unix)]
@@ -126,7 +126,7 @@ impl RawFileHandle {
     }
 
     /// Get the actual file handle.
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     pub fn into_inner(self) -> Handle {
         self.0
     }
@@ -136,7 +136,7 @@ impl RawFileHandle {
     /// Since this method could potentially create multiple
     /// [File]s referencing the same file descriptor, this method
     /// is marked as unsafe.
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     pub unsafe fn into_file(self) -> File {
         use std::os::io::FromRawHandle;
 
@@ -156,7 +156,7 @@ impl AsRawHandle for File {
     }
 }
 
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 impl AsRawHandle for File {
     type Handle = RawFileHandle;
 

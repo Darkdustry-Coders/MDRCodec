@@ -73,6 +73,8 @@ impl Compression {
     }
 
     /// Write arbitrary data.
+    ///
+    /// Caller must ensure that the data is readable.
     pub fn write_data<W: Write>(&self, mut write: W, buf: &[u8]) -> io::Result<usize> {
         match self {
             Compression::None => {
@@ -83,10 +85,9 @@ impl Compression {
                     ));
                 }
 
-                write.write_u32_le(buf.len() as u32)?;
                 write.write_all(buf)?;
 
-                Ok(buf.len() + 4)
+                Ok(buf.len())
             }
             #[cfg(feature = "lz4")]
             Compression::Lz4 { mode } => {
@@ -98,10 +99,9 @@ impl Compression {
                     ));
                 }
 
-                write.write_u32_le(buf.len() as u32)?;
                 write.write_all(&buf)?;
 
-                Ok(buf.len() + 4)
+                Ok(buf.len())
             }
             #[cfg(feature = "flate2")]
             Compression::Deflate { quality } => {
@@ -126,10 +126,9 @@ impl Compression {
                     ));
                 }
 
-                write.write_u32_le(vec.len() as u32)?;
                 write.write_all(&vec)?;
 
-                Ok(vec.len() + 4)
+                Ok(vec.len())
             }
             #[cfg(feature = "flate2")]
             Compression::Zlib { quality } => {
@@ -154,10 +153,9 @@ impl Compression {
                     ));
                 }
 
-                write.write_u32_le(vec.len() as u32)?;
                 write.write_all(&vec)?;
 
-                Ok(vec.len() + 4)
+                Ok(vec.len())
             }
             #[cfg(feature = "flate2")]
             Compression::Gzip { quality } => {
@@ -182,27 +180,25 @@ impl Compression {
                     ));
                 }
 
-                write.write_u32_le(vec.len() as u32)?;
                 write.write_all(&vec)?;
 
-                Ok(vec.len() + 4)
+                Ok(vec.len())
             }
         }
     }
 
-    pub fn read_data<R: Read>(&self, mut read: R) -> io::Result<Vec<u8>> {
+    pub fn read_data<R: Read>(&self, mut read: R, len: u32) -> io::Result<Vec<u8>> {
         match self {
             Compression::None => {
-                let len = read.read_u32_le()? as usize;
-                let mut buf = vec![0; len];
-                read.read_exact(&mut buf)?;
-                Ok(buf)
+                let mut data = Vec::with_capacity(len as usize);
+                read.read_to_end(&mut data)?;
+                data.shrink_to_fit();
+                Ok(data)
             }
             #[cfg(feature = "lz4")]
             Compression::Lz4 { .. } => {
-                let len = read.read_u32_le()? as usize;
-                let mut buf = vec![0; len];
-                read.read_exact(&mut buf)?;
+                let mut buf = Vec::with_capacity(len as usize);
+                read.read_to_end(&mut buf)?;
                 let buf = lz4::block::decompress(&buf, None)?;
                 Ok(buf)
             }

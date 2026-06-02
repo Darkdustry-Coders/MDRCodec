@@ -27,6 +27,9 @@ impl<W: AsyncWrite> AsyncStreamingEncoder<W> {
 
     /// Flush the buffers.
     ///
+    /// If there are unsaved modifications, a new MOD chunk will be created,
+    /// alongside all other required chunks.
+    ///
     /// ## Cancellation safety
     ///
     /// This method is *not* cancel-safe. Cancelling this method may
@@ -58,6 +61,9 @@ impl<W: AsyncWrite + AsyncSeek> AsyncSeekingEncoder<W> {
     }
 
     /// Flush the buffers.
+    ///
+    /// If there are unsaved modifications, a new MOD chunk will be created,
+    /// alongside all other required chunks.
     ///
     /// ## Cancellation safety
     ///

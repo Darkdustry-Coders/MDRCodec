@@ -976,6 +976,8 @@ write_ext! {
     fn write_u32_le(&mut self, u32);
     fn write_u64_le(&mut self, u64);
     fn write_u128_le(&mut self, u128);
+    fn write_f32_le(&mut self, f32);
+    fn write_f64_le(&mut self, f64);
 }
 
 macro_rules! read_ext {
@@ -1003,6 +1005,8 @@ read_ext! {
     fn read_u32_le(&mut self, u32);
     fn read_u64_le(&mut self, u64);
     fn read_u128_le(&mut self, u128);
+    fn read_f32_le(&mut self, f32);
+    fn read_f64_le(&mut self, f64);
 }
 
 macro_rules! awrite_ext {
@@ -1030,6 +1034,8 @@ awrite_ext! {
     fn write_u32_le(&mut self, u32);
     fn write_u64_le(&mut self, u64);
     fn write_u128_le(&mut self, u128);
+    fn write_f32_le(&mut self, f32);
+    fn write_f64_le(&mut self, f64);
 }
 
 macro_rules! aread_ext {
@@ -1059,4 +1065,6 @@ aread_ext! {
     fn read_u32_le(&mut self, u32);
     fn read_u64_le(&mut self, u64);
     fn read_u128_le(&mut self, u128);
+    fn read_f32_le(&mut self, f32);
+    fn read_f64_le(&mut self, f64);
 }

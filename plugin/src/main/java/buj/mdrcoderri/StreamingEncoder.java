@@ -1,10 +1,13 @@
 package buj.mdrcoderri;
 
 import java.nio.ByteOrder;
+import java.util.WeakHashMap;
 
 import arc.struct.Seq;
+import arc.util.Log;
 import mindustry.Vars;
 import mindustry.ctype.MappableContent;
+import mindustry.gen.Unit;
 
 /**
  * Encoder with 'Seek' support.
@@ -98,6 +101,60 @@ public class StreamingEncoder implements AutoCloseable {
         });
 
         Try.v(() -> Main.libmdrcodec.mdrcoderBasicEncoderWriteMapRaw(encoder, address, len));
+    }
+
+    private static class UnitCache {
+        float x;
+        float y;
+        byte dir;
+    }
+    private final WeakHashMap<Unit, UnitCache> cache = new WeakHashMap<>();
+
+    private byte dirByte(float dir) {
+        dir /= 360;
+        dir %= 1;
+        if (dir < 0) dir++;
+        dir *= 256;
+        return (byte) (int) dir;
+    }
+
+    public void unitUpdate(Unit unit) {
+        Try.v(() -> {
+            var cache = this.cache.get(unit);
+            if (cache == null) {
+                cache = new UnitCache();
+                cache.x = unit.x;
+                cache.y = unit.y;
+                cache.dir = dirByte(unit.rotation);
+                this.cache.put(unit, cache);
+            }
+            var dx = cache.x - unit.x;
+            if (dx < 0) dx = -dx;
+            var dy = cache.y - unit.y;
+            if (dy < 0) dy = -dy;
+            if (dx > 4 || dy > 4) {
+                lib.mdrcoderBasicEncoderWriteModUnitMoved(encoder, unit.id, unit.x, unit.y);
+                cache.x = unit.x;
+                cache.y = unit.y;
+            }
+            var dir = dirByte(unit.rotation);
+            if (cache.dir != dir) {
+                lib.mdrcoderBasicEncoderWriteModUnitRot(encoder, unit.id, dir);
+                cache.dir = dir;
+            }
+        });
+    }
+
+    public void unitDied(Unit unit) {
+        Try.v(() -> lib.mdrcoderBasicEncoderWriteModUnitDead(encoder, unit.id));
+    }
+
+    public void unitDespawned(Unit unit) {
+        Try.v(() -> lib.mdrcoderBasicEncoderWriteModUnitDespawn(encoder, unit.id));
+    }
+
+    public void flush() {
+        Try.v(() -> lib.mdrcoderBasicEncoderFlush(encoder));
     }
 
     @Override

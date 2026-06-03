@@ -69,8 +69,16 @@ impl<'a> Iterator for IdChunkv1Iter<'a> {
     type Item = (u16, &'a str);
 
     fn next(&mut self) -> Option<Self::Item> {
-        let id = self.body.read_u16_le().ok()?;
-        let len = self.body.read_u8().ok()?;
+        let id = {
+            let mut buf = [0, 0];
+            match self.body.read(&mut buf) {
+                Ok(0) => return None,
+                Ok(2) => (),
+                Ok(_) | Err(_) => panic!("failed to fill the whole buffer"),
+            }
+            u16::from_le_bytes(buf)
+        };
+        let len = self.body.read_u8().expect("failed to read length");
         let str = unsafe { str::from_utf8_unchecked(&self.body[..len as usize]) };
         self.body = &self.body[len as usize..];
         Some((id, str))
@@ -125,6 +133,103 @@ impl ops::Index<(u32, u32)> for MapChunkv1 {
     }
 }
 
+pub struct ModChunkv1 {
+    pub(crate) body: Vec<u8>,
+}
+impl ModChunkv1 {
+    pub fn entries(&self) -> ModChunkv1Iter<'_> {
+        ModChunkv1Iter { body: &self.body }
+    }
+}
+pub struct ModChunkv1Iter<'a> {
+    body: &'a [u8],
+}
+impl<'a> Iterator for ModChunkv1Iter<'a> {
+    type Item = Change;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (offset, kind) = loop {
+            let offset = Duration::from_millis({
+                let mut buf = [0; 4];
+                match self.body.read(&mut buf) {
+                    Ok(0) => return None,
+                    Ok(4) => (),
+                    Ok(_) | Err(_) => panic!("failed to fill the full buffer"),
+                }
+                u32::from_le_bytes(buf)
+            } as u64);
+            let kind = self.body.read_u8().expect("failed to read kind");
+            if kind != 0 { break (offset, kind); }
+        };
+
+        match kind {
+            1 => {
+                let unit_id = self.body.read_i32_le().expect("failed to read unit id");
+                let x = self.body.read_f32_le().expect("failed to read unit x position");
+                let y = self.body.read_f32_le().expect("failed to read unit y position");
+                Some(Change { offset, kind: ChangeKind::UnitMoved { unit_id, x, y } })
+            }
+            2 => {
+                let unit_id = self.body.read_i32_le().expect("failed to read unit id");
+                let rot = self.body.read_u8().expect("failed to read unit rotation");
+                Some(Change { offset, kind: ChangeKind::UnitRotation { unit_id, rot } })
+            }
+            3 => {
+                let unit_id = self.body.read_i32_le().expect("failed to read unit id");
+                Some(Change { offset, kind: ChangeKind::UnitDead { unit_id } })
+            }
+            4 => {
+                let unit_id = self.body.read_i32_le().expect("failed to read unit id");
+                Some(Change { offset, kind: ChangeKind::UnitDespawn { unit_id } })
+            }
+            x => panic!("invalid change kind {x}"),
+        }
+    }
+}
+#[derive(Clone)]
+pub struct Change {
+    /// Offset from chunk's timestamp.
+    pub offset: Duration,
+    pub kind: ChangeKind,
+}
+impl Change {
+    #[must_use]
+    #[inline(always)]
+    pub const fn ordinal(&self) -> u8 {
+        self.kind.ordinal()
+    }
+}
+#[derive(Clone)]
+pub enum ChangeKind {
+    UnitMoved {
+        unit_id: i32,
+        x: f32,
+        y: f32,
+    },
+    UnitRotation {
+        unit_id: i32,
+        rot: u8,
+    },
+    UnitDead {
+        unit_id: i32,
+    },
+    UnitDespawn {
+        unit_id: i32,
+    },
+}
+impl ChangeKind {
+    #[must_use]
+    #[inline(always)]
+    pub const fn ordinal(&self) -> u8 {
+        match self {
+            ChangeKind::UnitMoved { .. } => 1,
+            ChangeKind::UnitRotation { .. } => 2,
+            ChangeKind::UnitDead { .. } => 3,
+            ChangeKind::UnitDespawn { .. } => 4,
+        }
+    }
+}
+
 pub struct Chunk {
     pub timestamp: Duration,
     pub body: ChunkBody,
@@ -138,12 +243,14 @@ impl Chunk {
 pub enum ChunkBody {
     Mapv1(MapChunkv1),
     Idv1(IdChunkv1),
+    Modv1(ModChunkv1),
 }
 impl ChunkBody {
     pub const fn kind(&self) -> ChunkKind {
         match self {
             ChunkBody::Mapv1(_) => ChunkKind::Map,
             ChunkBody::Idv1(_) => ChunkKind::Id,
+            ChunkBody::Modv1(_) => ChunkKind::Mod,
         }
     }
 }

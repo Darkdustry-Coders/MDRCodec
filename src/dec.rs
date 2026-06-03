@@ -2,7 +2,7 @@
 
 use std::{io::{self, Cursor, Read, Seek, SeekFrom}, time::Duration};
 
-use crate::{data::{Chunk, ChunkBody, ChunkKind, IdChunkv1, MapChunkv1, Tilev1}, io::{GenericIo, ReadExt, TryClone}, opt::Compression};
+use crate::{data::{Chunk, ChunkBody, ChunkKind, IdChunkv1, MapChunkv1, ModChunkv1, Tilev1}, io::{GenericIo, ReadExt, TryClone}, opt::Compression};
 
 #[allow(unused)]
 macro_rules! sread {
@@ -332,7 +332,21 @@ impl<R> Iterator for Decoder<R> {
                         body: buf,
                     }) }))
                 }
-                4 => todo!(),
+                4 => {
+                    let buf = match self.compression {
+                        Compression::None => buf,
+                        x => { let len = buf.len(); match x.read_data(Cursor::new(buf), len as u32) {
+                            Ok(x) => x,
+                            Err(why) => return Some(Err(why)),
+                        } },
+                    };
+                    if self.validate {
+                        // TODO.
+                    }
+                    return Some(Ok(Chunk { timestamp, body: ChunkBody::Modv1(ModChunkv1 {
+                        body: buf,
+                    }) }))
+                },
                 x => {
                     return Some(Err(io::Error::new(io::ErrorKind::InvalidData, format!("invalid chunk {x}"))));
                 }

@@ -13,7 +13,7 @@ use futures_io::{AsyncSeek, AsyncWrite};
 use futures_util::AsyncSeekExt;
 
 use crate::{
-    data::{ChunkKind, TileAccess, WorldAccess},
+    data::{ChangeKind, ChunkKind, TileAccess, WorldAccess},
     io::{GenericIo, TryClone, WriteExactly, WriteExt},
     opt::Compression,
 };
@@ -965,6 +965,118 @@ impl<W> Encoder<W> {
         self.flush_mod_async().await?;
 
         self.write_chunk_async(ChunkKind::Id, self.timestamp(), map).await?;
+
+        Ok(())
+    }
+
+    /// Try write change into the buffer.
+    ///
+    /// Returns `true` if writing succeeded, otherwise `false`.
+    fn write_change_buf(&mut self, change: &ChangeKind) -> bool {
+        let offset = ((Instant::now() - self.epoch).as_millis() as u64 - self.mod_start_ts) as u32;
+        match change {
+            ChangeKind::UnitMoved { unit_id, x, y } => {
+                let mut write = WriteExactly::<{ 1 + 4 + 4 + 4 + 4 }>::new();
+                write.write_u32_le(offset).unwrap();
+                write.write_u8(1).unwrap();
+                write.write_i32_le(*unit_id).unwrap();
+                write.write_f32_le(*x).unwrap();
+                write.write_f32_le(*y).unwrap();
+                let buf = write.finalize().unwrap();
+                if self.mod_act_buffer.len() - self.mod_act_len < buf.len() { return false; }
+                self.mod_act_buffer[self.mod_act_len..][..buf.len()].copy_from_slice(&buf);
+                self.mod_act_len += buf.len();
+            },
+            ChangeKind::UnitRotation { unit_id, rot } => {
+                let mut write = WriteExactly::<{ 1 + 4 + 4 + 1 }>::new();
+                write.write_u32_le(offset).unwrap();
+                write.write_u8(2).unwrap();
+                write.write_i32_le(*unit_id).unwrap();
+                write.write_u8(*rot).unwrap();
+                let buf = write.finalize().unwrap();
+                if self.mod_act_buffer.len() - self.mod_act_len < buf.len() { return false; }
+                self.mod_act_buffer[self.mod_act_len..][..buf.len()].copy_from_slice(&buf);
+                self.mod_act_len += buf.len();
+            },
+            ChangeKind::UnitDead { unit_id } => {
+                let mut write = WriteExactly::<{ 1 + 4 + 4 }>::new();
+                write.write_u32_le(offset).unwrap();
+                write.write_u8(3).unwrap();
+                write.write_i32_le(*unit_id).unwrap();
+                let buf = write.finalize().unwrap();
+                if self.mod_act_buffer.len() - self.mod_act_len < buf.len() { return false; }
+                self.mod_act_buffer[self.mod_act_len..][..buf.len()].copy_from_slice(&buf);
+                self.mod_act_len += buf.len();
+            },
+            ChangeKind::UnitDespawn { unit_id } => {
+                let mut write = WriteExactly::<{ 1 + 4 + 4 }>::new();
+                write.write_u32_le(offset).unwrap();
+                write.write_u8(4).unwrap();
+                write.write_i32_le(*unit_id).unwrap();
+                let buf = write.finalize().unwrap();
+                if self.mod_act_buffer.len() - self.mod_act_len < buf.len() { return false; }
+                self.mod_act_buffer[self.mod_act_len..][..buf.len()].copy_from_slice(&buf);
+                self.mod_act_len += buf.len();
+            },
+        }
+        true
+    }
+
+    /// Append a change.
+    ///
+    /// This will create a mod chunk once another chunk will need to be
+    /// written, a write timeout has expired, or the writer is flushed,
+    /// or the modifications buffer is full.
+    ///
+    /// ## Safety
+    ///
+    /// The caller must ensure that the passed data is a valid ID chunk body.
+    ///
+    /// If not, the file may become unparseable.
+    pub fn write_change(&mut self, change: &ChangeKind) -> io::Result<()> {
+        if self.mod_act_len == 0 {
+            self.mod_start_ts = (Instant::now() - self.epoch).as_millis() as u64;
+        }
+
+        if !self.write_change_buf(change) {
+            self.flush_mod()?;
+            if !self.write_change_buf(change) {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "modifications buffer too short"));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Append a change.
+    ///
+    /// This will create a mod chunk once another chunk will need to be
+    /// written, a write timeout has expired, or the writer is flushed,
+    /// or the modifications buffer is full.
+    ///
+    /// ## Safety
+    ///
+    /// The caller must ensure that the passed data is a valid ID chunk body.
+    ///
+    /// If not, the file may become unparseable.
+    ///
+    /// ## Cancellation safety
+    ///
+    /// This method is *not* cancel-safe. Cancelling this method may
+    /// result in broken chunks, as well as corrupting the internal
+    /// buffer, making the file unreadable.
+    #[cfg(feature = "futures")]
+    pub async fn write_change_async(&mut self, change: &ChangeKind) -> io::Result<()> {
+        if self.mod_act_len == 0 {
+            self.mod_start_ts = (Instant::now() - self.epoch).as_millis() as u64;
+        }
+
+        if !self.write_change_buf(change) {
+            self.flush_mod_async().await?;
+            if !self.write_change_buf(change) {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "modifications buffer too short"));
+            }
+        }
 
         Ok(())
     }

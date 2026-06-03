@@ -123,14 +123,22 @@ ModChunkv1Record:
             ,
         if kind == 1,
             << unit moved >>
-            (u32(unit_id))
+            (i32(unit_id))
             (f32le(x))
             (f32le(y))
             ,
         if kind == 2,
             << unit rotation changed >>
-            (u32(unit_id))
+            (i32(unit_id))
             (u8(rotation))
+            ,
+        if kind == 3,
+            << unit dead >>
+            (i32(unit_id))
+            ,
+        if kind == 4,
+            << unit despawn >>
+            (i32(unit_id))
             ,
         else (unreachable)
     }

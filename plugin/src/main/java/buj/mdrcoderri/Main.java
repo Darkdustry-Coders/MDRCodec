@@ -5,10 +5,15 @@ import java.time.Instant;
 import java.util.Date;
 
 import arc.Events;
+import arc.util.Log;
+import arc.util.Timer;
 import jdk.incubator.foreign.CLinker;
 import mindustry.Vars;
 import mindustry.game.EventType.PlayEvent;
 import mindustry.game.EventType.ResetEvent;
+import mindustry.game.EventType.UnitDestroyEvent;
+import mindustry.game.EventType.UnitUnloadEvent;
+import mindustry.gen.Groups;
 import mindustry.mod.Plugin;
 
 public class Main extends Plugin {
@@ -48,11 +53,34 @@ public class Main extends Plugin {
             encoder = Try.x(() -> libmdrcodec.startRecording(new RandomAccessFile(fi.r.file(), "rw")));
         });
 
+        Events.on(UnitDestroyEvent.class, event -> {
+            if (encoder != null) encoder.unitDied(event.unit);
+        });
+
+        Events.on(UnitUnloadEvent.class, event -> {
+            if (encoder != null) encoder.unitDespawned(event.unit);
+        });
+
+        Timer.schedule(() -> {
+            if (encoder != null) Groups.unit.each(encoder::unitUpdate);
+        }, 0.1f, 0.1f);
+
+        Timer.schedule(() -> {
+            if (encoder != null) encoder.flush();
+        }, 10f, 10f);
+
         Events.on(ResetEvent.class, event -> {
             if (encoder != null) {
                 Try.close(encoder);
                 encoder = null;
             }
         });
+        
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            if (encoder != null) {
+                Try.close(encoder);
+                encoder = null;
+            }
+        }));
     }
 }

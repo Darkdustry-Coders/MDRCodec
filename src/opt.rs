@@ -1,6 +1,6 @@
 use std::io::{self, Read, Write};
 
-use crate::io::{ReadExt, WriteExt};
+use crate::io::ReadExt;
 
 pub struct CountingWrite<W> {
     write: W,

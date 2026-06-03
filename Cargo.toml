@@ -4,6 +4,8 @@ members = [
     ".",
 
     "mdrcprobe",
+    "webmdrdec",
+    "webmdrdec-client",
 ]
 
 [package]

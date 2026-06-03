@@ -2,7 +2,7 @@
 
 use std::{io::{self, Read, Seek, Write}, mem::transmute};
 
-use crate::{data::{Chunk, WorldAccess}, dec::Decoder, enc::Encoder, io::TryClone, opt::Compression};
+use crate::{data::{ChangeKind, Chunk, WorldAccess}, dec::Decoder, enc::Encoder, io::TryClone, opt::Compression};
 
 /// A synchronous streaming encoder.
 pub struct StreamingEncoder<W> {
@@ -47,6 +47,15 @@ impl<W: Write> StreamingEncoder<W> {
         unsafe {
             self.inner.write_id_raw(map)
         }
+    }
+
+    /// Append a change.
+    ///
+    /// This will create a mod chunk once another chunk will need to be
+    /// written, a write timeout has expired, or the writer is flushed,
+    /// or the modifications buffer is full.
+    pub fn write_change(&mut self, change: &ChangeKind) -> io::Result<()> {
+        self.inner.write_change(change)
     }
 
     /// Flush the buffers.
@@ -104,6 +113,15 @@ impl<W: Write + Seek> SeekingEncoder<W> {
         }
     }
 
+    /// Append a change.
+    ///
+    /// This will create a mod chunk once another chunk will need to be
+    /// written, a write timeout has expired, or the writer is flushed,
+    /// or the modifications buffer is full.
+    pub fn write_change(&mut self, change: &ChangeKind) -> io::Result<()> {
+        self.inner.write_change(change)
+    }
+
     /// Flush the buffers.
     ///
     /// If there are unsaved modifications, a new MOD chunk will be created,
@@ -158,6 +176,15 @@ impl<W: TryClone + Write + Seek> CloningEncoder<W> {
         unsafe {
             self.inner.write_id_raw(map)
         }
+    }
+
+    /// Append a change.
+    ///
+    /// This will create a mod chunk once another chunk will need to be
+    /// written, a write timeout has expired, or the writer is flushed,
+    /// or the modifications buffer is full.
+    pub fn write_change(&mut self, change: &ChangeKind) -> io::Result<()> {
+        self.inner.write_change(change)
     }
 
     /// Flush the buffers.

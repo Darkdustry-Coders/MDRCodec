@@ -1,0 +1,7 @@
+[package]
+name = "mdrcprobe"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mdrcodec = { path = "..", features = ["lz4", "flate2"] }

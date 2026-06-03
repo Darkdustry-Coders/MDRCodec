@@ -9,11 +9,11 @@
 use std::pin::pin;
 use std::{
     fs::File,
-    io::{self, BufWriter, Read, Seek, SeekFrom, Write},
+    io::{self, Cursor, Read, Seek, SeekFrom, Write},
     net::{TcpListener, TcpStream, UdpSocket},
 };
 
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 use std::os::windows::io::RawHandle as Handle;
 #[cfg(unix)]
 use std::os::{
@@ -23,6 +23,21 @@ use std::os::{
 
 #[cfg(feature = "futures")]
 use futures_io::{AsyncRead, AsyncSeek, AsyncWrite};
+
+/// Mark trait as being safe to instantiate via zeroing the memory.
+pub unsafe trait Zeroed {}
+
+#[inline(always)]
+pub const fn zeroed<T: Zeroed>() -> T { unsafe { std::mem::zeroed() } }
+pub fn zeroed_vec<T: Zeroed>(len: usize) -> Vec<T> { unsafe {
+    let mut vec = Vec::with_capacity(len);
+    vec.set_len(len);
+    for x in vec.iter_mut() {
+        let x = x as *mut T;
+        x.write_bytes(0, size_of::<T>());
+    }
+    vec
+} }
 
 /// A trait to abstract over various implementations of `try_clone`.
 pub trait TryClone: Sized {
@@ -166,6 +181,45 @@ impl AsRawHandle for File {
     fn into_raw(self) -> Self::Handle {
         RawFileHandle(std::os::windows::io::IntoRawHandle::into_raw_handle(self))
     }
+}
+
+/// Write exactly N bytes.
+///
+/// Used to make IO more performant without making it a whole
+/// lot worse.
+///
+/// The internal buffer is stored on stack.
+pub struct WriteExactly<const LEN: usize> {
+    write: Cursor<[u8; LEN]>,
+}
+impl<const LEN: usize> WriteExactly<LEN> {
+    /// Create new [WriteExactly].
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            write: Cursor::new([0; LEN]),
+        }
+    }
+
+    /// Finalize this [WriteExact].
+    ///
+    /// Returns [Err] if buffer wasn't fully filled.
+    pub fn finalize(self) -> io::Result<[u8; LEN]> {
+        if self.write.position() as usize != LEN {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "failed to fill the whole buffer"));
+        }
+
+        Ok(self.write.into_inner())
+    }
+}
+impl<const LEN: usize> Write for WriteExactly<LEN> {
+    #[inline(always)]
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.write.write(buf)
+    }
+
+    #[inline(always)]
+    fn flush(&mut self) -> io::Result<()> { Ok(()) }
 }
 
 struct SeekVTable<O> {

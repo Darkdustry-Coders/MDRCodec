@@ -1,8 +1,8 @@
 //! Properly typed encoder/decoders with a guaranteed synchronous API.
 
-use std::{io::{self, Seek, Write}, mem::transmute};
+use std::{io::{self, Read, Seek, Write}, mem::transmute};
 
-use crate::{data::WorldAccess, enc::Encoder, io::TryClone, opt::Compression};
+use crate::{data::{Chunk, WorldAccess}, dec::Decoder, enc::Encoder, io::TryClone, opt::Compression};
 
 /// A synchronous streaming encoder.
 pub struct StreamingEncoder<W> {
@@ -175,5 +175,25 @@ impl<W: TryClone + Write + Seek> AsRef<SeekingEncoder<W>> for CloningEncoder<W> 
         unsafe {
             transmute(self)
         }
+    }
+}
+
+/// A synchronous streaming decoder.
+pub struct StreamingDecoder<R> {
+    inner: Decoder<R>,
+}
+impl<R: Read> StreamingDecoder<R> {
+    /// Create a new [StreamingDecoder] instance.
+    pub fn new(read: R) -> io::Result<Self> {
+        let encoder = Decoder::builder(read)
+            .readable()
+            .build()?;
+        Ok(Self { inner: encoder })
+    }
+}
+impl<R: Read> Iterator for StreamingDecoder<R> {
+    type Item = io::Result<Chunk>;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
     }
 }

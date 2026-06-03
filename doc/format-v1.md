@@ -6,6 +6,7 @@ An early draft. World chunks are WIP.
 (byte[] { 'M', 'D', 'R', '\0' }: magic)
 (u16le: format version = 1)
 (CompressionSettings)
+(BackBound)
 (Chunk<dyn>[?]: data..)
 
 CompressionSettings:
@@ -56,6 +57,13 @@ Chunk:
     (u32le = len)
     (u64le = timestamp)
     (u64le: file pointer to a previous JMP chunk. 0 if none)
+
+## A full 0 border to stop any further reading.
+BackBound:
+    (u8 = 0)
+    (u32le = 0)
+    (u64le = 0)
+    (u64le = 0)
 
 JmpChunkv1: (Chunk.{ body = JmpChunkv1Body, kind = 1 })
 JmpChunkv1Body:

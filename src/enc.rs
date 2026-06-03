@@ -10,11 +10,11 @@ use std::{
 #[cfg(feature = "futures")]
 use futures_io::{AsyncSeek, AsyncWrite};
 #[cfg(feature = "futures")]
-use futures_util::{AsyncSeekExt, AsyncWriteExt};
+use futures_util::AsyncSeekExt;
 
 use crate::{
     data::{ChunkKind, TileAccess, WorldAccess},
-    io::{GenericIo, TryClone, WriteExt},
+    io::{GenericIo, TryClone, WriteExactly, WriteExt},
     opt::Compression,
 };
 
@@ -71,6 +71,30 @@ macro_rules! aseek {
                 ))
             }
         }
+    };
+}
+
+macro_rules! uswrite {
+    ($self:expr) => {
+        unsafe { $self.write.writeable().unwrap_unchecked() }
+    };
+}
+macro_rules! usseek {
+    ($self:expr) => {
+        unsafe { $self.write.seekable().unwrap_unchecked() }
+    };
+}
+
+#[cfg(feature = "futures")]
+macro_rules! uawrite {
+    ($self:expr) => {
+        unsafe { $self.write.async_writeable().unwrap_unchecked() }
+    };
+}
+#[cfg(feature = "futures")]
+macro_rules! uaseek {
+    ($self:expr) => {
+        unsafe { $self.write.async_seekable().unwrap_unchecked() }
     };
 }
 
@@ -258,6 +282,7 @@ impl<W> Builder<W> {
         write.write_all(b"MDR\0")?;
         write.write_u16_le(1)?;
         self.compression.write(&mut write)?;
+        write.write_all(&[0; 8 + 8 + 4 + 1])?;
         write.flush()?;
 
         Ok(enc)
@@ -324,6 +349,7 @@ impl<W> Builder<W> {
         write.write_all(b"MDR\0").await?;
         write.write_u16_le(1).await?;
         self.compression.write_async(&mut write).await?;
+        write.write_all(&[0; 8 + 8 + 4 + 1]).await?;
         write.flush().await?;
 
         Ok(enc)
@@ -543,6 +569,8 @@ impl<W> Encoder<W> {
         }
     }
 
+    // TODO: Implement a macro to simplify sync/async impls. This is horrific.
+
     /// Write a chunk.
     ///
     /// **Note**: This will automatically create a jump table entry, or allocate a
@@ -569,73 +597,106 @@ impl<W> Encoder<W> {
 
         if self.can_make_jmpt() {
             let this_pos = sseek!(self).stream_position()?;
-            let prev_jmpt = self.jmptable_at_ptr;
 
-            if match &mut self.jmptable_at {
-                JmpTableImpl::None => true,
+            match &mut self.jmptable_at {
+                JmpTableImpl::None => {
+                    let mut write = uswrite!(self);
+                    write.write_all(&{
+                        let mut write = WriteExactly::<{1 + 8 + 4}>::new();
+                        write.write_u8(ChunkKind::Jmp.ordinal())?;
+                        write.write_u64_le(timestamp)?;
+                        write.write_u32_le(self.jmptable_zeroes.len() as u32)?;
+                        write.finalize()?
+                    })?;
+                    write.write_all(&self.jmptable_zeroes)?;
+                    write.write_all(&{
+                        let mut write = WriteExactly::<{1 + 4 + 8 + 8}>::new();
+                        write.write_u8(ChunkKind::Jmp.ordinal())?;
+                        write.write_u32_le(self.jmptable_zeroes.len() as u32)?;
+                        write.write_u64_le(timestamp)?;
+                        write.write_u64_le(self.jmptable_at_ptr)?;
+                        write.finalize()?
+                    })?;
+
+                    self.jmptable_at_ptr = this_pos;
+                    self.jmptable_last_ts = timestamp;
+                    self.jmptable_remaining = self.jmptable_size;
+
+                    if let Some(new_io) = self.write.try_clone() {
+                        self.jmptable_at = JmpTableImpl::File(new_io?);
+                    } else {
+                        self.jmptable_at = JmpTableImpl::Addr(self.jmptable_at_ptr + 1 + 8 + 4);
+                    }
+                },
                 JmpTableImpl::Addr(addr) => {
-                    if self.jmptable_remaining > 0 {
-                        self.jmptable_remaining -= 1;
-                        sseek!(self).seek(io::SeekFrom::Start(*addr))?;
-                        let mut write = swrite!(self);
+                    self.jmptable_remaining -= 1;
+                    usseek!(self).seek(io::SeekFrom::Start(*addr))?;
+                    let mut write = swrite!(self);
+                    write.write_all(&{
+                        let mut write = WriteExactly::<{1 + 8 + 8}>::new();
                         write.write_u8(name.ordinal())?;
                         write.write_u64_le(timestamp)?;
                         write.write_u64_le(this_pos)?;
-                        write.flush()?;
-                        sseek!(self).seek(io::SeekFrom::Start(this_pos))?;
-
-                        false
-                    } else { true }
+                        write.finalize()?
+                    })?;
+                    *addr += 1 + 8 + 8;
+                    usseek!(self).seek(io::SeekFrom::Start(this_pos))?;
                 },
                 JmpTableImpl::File(io) => {
-                    if self.jmptable_remaining > 0 {
-                        self.jmptable_remaining -= 1;
-                        let mut write = io.writeable().unwrap();
-                        write.write_u8(name.ordinal())?;
-                        write.write_u64_le(timestamp)?;
-                        write.write_u64_le(this_pos)?;
-                        write.flush()?;
-
-                        false
-                    } else { true }
-                }
-            } {
-                let mut write = swrite!(self);
-                write.write_u8(ChunkKind::Jmp.ordinal())?;
-                write.write_u64_le(timestamp)?;
-                write.write_u32_le(self.jmptable_zeroes.len() as u32)?;
-                write.write_all(&self.jmptable_zeroes)?;
-                write.write_u8(ChunkKind::Jmp.ordinal())?;
-                write.write_u32_le(self.jmptable_zeroes.len() as u32)?;
-                write.write_u64_le(timestamp)?;
-                write.write_u64_le(prev_jmpt)?;
-                write.flush()?;
-
-                self.jmptable_at_ptr = this_pos;
-                self.jmptable_last_ts = timestamp;
-                self.jmptable_remaining = self.jmptable_size;
-
-                if let Some(new_io) = self.write.try_clone() {
-                    self.jmptable_at = JmpTableImpl::File(new_io?);
-                } else {
-                    self.jmptable_at = JmpTableImpl::Addr(self.jmptable_at_ptr);
+                    self.jmptable_remaining -= 1;
+                    let mut write = io.writeable().unwrap();
+                    write.write_u8(name.ordinal())?;
+                    write.write_u64_le(timestamp)?;
+                    write.write_u64_le(this_pos)?;
+                    write.flush()?;
                 }
             }
         }
 
-        let mut buf = vec![];
-        self.compression.write_data(Cursor::new(&mut buf), data)?;
+        let buf = if matches!(&self.compression, Compression::None) {
+            Cow::Borrowed(data)
+        } else {
+            let mut buf = vec![];
+            self.compression.write_data(Cursor::new(&mut buf), data)?;
+            Cow::Owned(buf)
+        };
 
         let mut write = swrite!(self);
-        write.write_u8(name.ordinal())?;
-        write.write_u64_le(timestamp)?;
-        write.write_u32_le(buf.len() as u32)?;
+        write.write_all(&{
+            let mut write = WriteExactly::<{1 + 8 + 4}>::new();
+            write.write_u8(name.ordinal())?;
+            write.write_u64_le(timestamp)?;
+            write.write_u32_le(buf.len() as u32)?;
+            write.finalize()?
+        })?;
         write.write_all(&buf)?;
-        write.write_u8(name.ordinal())?;
-        write.write_u32_le(buf.len() as u32)?;
-        write.write_u64_le(timestamp)?;
-        write.write_u64_le(self.jmptable_at_ptr)?;
-        write.flush()?;
+        write.write_all(&{
+            let mut write = WriteExactly::<{1 + 4 + 8 + 8}>::new();
+            write.write_u8(name.ordinal())?;
+            write.write_u32_le(buf.len() as u32)?;
+            write.write_u64_le(timestamp)?;
+            write.write_u64_le(self.jmptable_at_ptr)?;
+            write.finalize()?
+        })?;
+
+        match &mut self.jmptable_at {
+            JmpTableImpl::None => (),
+            JmpTableImpl::Addr(addr) => {
+                let this_pos = usseek!(self).stream_position()?;
+                usseek!(self).seek(io::SeekFrom::Start(*addr))?;
+                uswrite!(self).write_u8(1)?;
+                usseek!(self).seek(io::SeekFrom::Start(this_pos))?;
+                *addr += 1;
+            },
+            JmpTableImpl::File(io) => {
+                let mut write = unsafe { io.writeable().unwrap_unchecked() };
+                write.write_u8(1)?;
+                write.flush()?;
+            },
+        }
+        if self.jmptable_remaining == 0 { self.jmptable_at = JmpTableImpl::None; }
+
+        uswrite!(self).flush()?;
 
         Ok(())
     }
@@ -653,12 +714,7 @@ impl<W> Encoder<W> {
     /// This method is *not* cancel-safe. Cancelling this method may
     /// result in broken chunks, making the file unreadable.
     #[cfg(feature = "futures")]
-    async fn write_chunk_async(
-        &mut self,
-        name: ChunkKind,
-        timestamp: u64,
-        data: &[u8],
-    ) -> io::Result<()> {
+    async fn write_chunk_async(&mut self, name: ChunkKind, timestamp: u64, data: &[u8]) -> io::Result<()> {
         use futures_util::AsyncWriteExt as _;
         use crate::io::AsyncWriteExt as _;
 
@@ -680,61 +736,63 @@ impl<W> Encoder<W> {
 
         if self.can_make_jmpt() {
             let this_pos = aseek!(self).stream_position().await?;
-            let prev_jmpt = self.jmptable_at_ptr;
 
-            if match &mut self.jmptable_at {
-                JmpTableImpl::None => true,
+            match &mut self.jmptable_at {
+                JmpTableImpl::None => {
+                    let mut write = uawrite!(self);
+                    write.write_all(&{
+                        let mut write = WriteExactly::<{1 + 8 + 4}>::new();
+                        write.write_u8(ChunkKind::Jmp.ordinal())?;
+                        write.write_u64_le(timestamp)?;
+                        write.write_u32_le(self.jmptable_zeroes.len() as u32)?;
+                        write.finalize()?
+                    }).await?;
+                    write.write_all(&self.jmptable_zeroes).await?;
+                    write.write_all(&{
+                        let mut write = WriteExactly::<{1 + 4 + 8 + 8}>::new();
+                        write.write_u8(ChunkKind::Jmp.ordinal())?;
+                        write.write_u32_le(self.jmptable_zeroes.len() as u32)?;
+                        write.write_u64_le(timestamp)?;
+                        write.write_u64_le(self.jmptable_at_ptr)?;
+                        write.finalize()?
+                    }).await?;
+
+                    self.jmptable_at_ptr = this_pos;
+                    self.jmptable_last_ts = timestamp;
+                    self.jmptable_remaining = self.jmptable_size;
+
+                    if let Some(new_io) = self.write.try_clone() {
+                        self.jmptable_at = JmpTableImpl::File(new_io?);
+                    } else {
+                        self.jmptable_at = JmpTableImpl::Addr(self.jmptable_at_ptr + 1 + 8 + 4);
+                    }
+                },
                 JmpTableImpl::Addr(addr) => {
-                    if self.jmptable_remaining > 0 {
-                        self.jmptable_remaining -= 1;
-                        aseek!(self).seek(io::SeekFrom::Start(*addr)).await?;
-                        let mut write = awrite!(self);
-                        write.write_u8(name.ordinal()).await?;
-                        write.write_u64_le(timestamp).await?;
-                        write.write_u64_le(this_pos).await?;
-                        write.flush().await?;
-                        aseek!(self).seek(io::SeekFrom::Start(this_pos)).await?;
-
-                        false
-                    } else { true }
+                    self.jmptable_remaining -= 1;
+                    uaseek!(self).seek(io::SeekFrom::Start(*addr)).await?;
+                    let mut write = awrite!(self);
+                    write.write_all(&{
+                        let mut write = WriteExactly::<{1 + 8 + 8}>::new();
+                        write.write_u8(name.ordinal())?;
+                        write.write_u64_le(timestamp)?;
+                        write.write_u64_le(this_pos)?;
+                        write.finalize()?
+                    }).await?;
+                    *addr += 1 + 8 + 8;
+                    uaseek!(self).seek(io::SeekFrom::Start(this_pos)).await?;
                 },
                 JmpTableImpl::File(io) => {
-                    if self.jmptable_remaining > 0 {
-                        self.jmptable_remaining -= 1;
-                        let mut write = io.async_writeable().unwrap();
-                        write.write_u8(name.ordinal()).await?;
-                        write.write_u64_le(timestamp).await?;
-                        write.write_u64_le(this_pos).await?;
-                        write.flush().await?;
-
-                        false
-                    } else { true }
-                }
-            } {
-                let mut write = awrite!(self);
-                write.write_u8(ChunkKind::Jmp.ordinal()).await?;
-                write.write_u64_le(timestamp).await?;
-                write.write_u32_le(self.jmptable_zeroes.len() as u32).await?;
-                write.write_all(&self.jmptable_zeroes).await?;
-                write.write_u8(ChunkKind::Jmp.ordinal()).await?;
-                write.write_u32_le(self.jmptable_zeroes.len() as u32).await?;
-                write.write_u64_le(timestamp).await?;
-                write.write_u64_le(prev_jmpt).await?;
-                write.flush().await?;
-
-                self.jmptable_at_ptr = this_pos;
-                self.jmptable_last_ts = timestamp;
-                self.jmptable_remaining = self.jmptable_size;
-
-                if let Some(new_io) = self.write.try_clone() {
-                    self.jmptable_at = JmpTableImpl::File(new_io?);
-                } else {
-                    self.jmptable_at = JmpTableImpl::Addr(self.jmptable_at_ptr);
+                    self.jmptable_remaining -= 1;
+                    let mut write = io.async_writeable().unwrap();
+                    write.write_u8(name.ordinal()).await?;
+                    write.write_u64_le(timestamp).await?;
+                    write.write_u64_le(this_pos).await?;
+                    write.flush().await?;
                 }
             }
         }
 
-        let buf = if matches!(self.compression, Compression::None) {
+        let buf = if matches!(&self.compression, Compression::None) {
             Cow::Borrowed(data)
         } else {
             let mut buf = vec![];
@@ -743,15 +801,41 @@ impl<W> Encoder<W> {
         };
 
         let mut write = awrite!(self);
-        write.write_u8(name.ordinal()).await?;
-        write.write_u64_le(timestamp).await?;
-        write.write_u32_le(buf.len() as u32).await?;
+        write.write_all(&{
+            let mut write = WriteExactly::<{1 + 8 + 4}>::new();
+            write.write_u8(name.ordinal())?;
+            write.write_u64_le(timestamp)?;
+            write.write_u32_le(buf.len() as u32)?;
+            write.finalize()?
+        }).await?;
         write.write_all(&buf).await?;
-        write.write_u8(name.ordinal()).await?;
-        write.write_u32_le(buf.len() as u32).await?;
-        write.write_u64_le(timestamp).await?;
-        write.write_u64_le(self.jmptable_at_ptr).await?;
-        write.flush().await?;
+        write.write_all(&{
+            let mut write = WriteExactly::<{1 + 4 + 8 + 8}>::new();
+            write.write_u8(name.ordinal())?;
+            write.write_u32_le(buf.len() as u32)?;
+            write.write_u64_le(timestamp)?;
+            write.write_u64_le(self.jmptable_at_ptr)?;
+            write.finalize()?
+        }).await?;
+
+        match &mut self.jmptable_at {
+            JmpTableImpl::None => (),
+            JmpTableImpl::Addr(addr) => {
+                let this_pos = usseek!(self).stream_position()?;
+                uaseek!(self).seek(io::SeekFrom::Start(*addr)).await?;
+                uawrite!(self).write_u8(1).await?;
+                uaseek!(self).seek(io::SeekFrom::Start(this_pos)).await?;
+                *addr += 1;
+            },
+            JmpTableImpl::File(io) => {
+                let mut write = unsafe { io.async_writeable().unwrap_unchecked() };
+                write.write_u8(1).await?;
+                write.flush().await?;
+            },
+        }
+        if self.jmptable_remaining == 0 { self.jmptable_at = JmpTableImpl::None; }
+
+        uawrite!(self).flush().await?;
 
         Ok(())
     }
